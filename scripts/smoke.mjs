@@ -19,6 +19,8 @@ import { createInput } from '../src/app/input.js';
 import { labelFor, hintLine } from '../src/app/device-labels.js';
 import { createTitleScreen } from '../src/app/title.js';
 import { describeModel, strongestReadLine, recentCallback } from '../src/sim/playermodel.js';
+import { gen, DEFAULT_SPEC, requiredTypes } from '../src/sim/procgen.js';
+import { validateMap } from '../src/sim/procgen-validate.js';
 
 // The golden end-state fingerprint. null until first run prints it; then baked.
 const GOLDEN = '3434e401';
@@ -241,8 +243,71 @@ function fnv1a32Local(str) {
   check('recentCallback names the last-recorded axis/pole', recentCallback(w.playerModel).includes('ruthless'));
 }
 
+// --- procgen: pure fn, seed-reproducible, validated by construction ----------
+{
+  // Two calls with identical args must be byte-identical (canonical-equal).
+  const m1 = gen(7, 1, DEFAULT_SPEC);
+  const m2 = gen(7, 1, DEFAULT_SPEC);
+  check('gen is a pure function (same args -> identical map)', stableStringify(m1) === stableStringify(m2));
+
+  // Different seeds must not accidentally collapse to one constant map.
+  const mOther = gen(8, 1, DEFAULT_SPEC);
+  check('different seeds produce different maps', stableStringify(m1) !== stableStringify(mOther));
+
+  // The seed-stable retry index is itself derived from the seed — so a fixed
+  // seed always lands on the same attempt, never a wall-clock reroll.
+  check('gen output is byte-identical over a fresh third call', stableStringify(gen(7, 1, DEFAULT_SPEC)) === stableStringify(m1));
+
+  // The validator passes on generator output across the full seed suite. A
+  // failing seed is a real generator bug, not a reason to weaken the validator.
+  let suiteFails = [];
+  for (let s = 0; s < 20; s++) {
+    const map = gen(s, 1, DEFAULT_SPEC);
+    const probs = validateMap(map, DEFAULT_SPEC);
+    if (probs.length) suiteFails.push(`seed ${s}: ${probs.join('; ')}`);
+  }
+  check('validator passes across seed suite 0..19', suiteFails.length === 0);
+  if (suiteFails.length) for (const f of suiteFails) console.error('    ' + f);
+
+  // Every required node type reserved a placed slot (referential integrity).
+  const need = requiredTypes(DEFAULT_SPEC);
+  const roles = new Set(m1.slots.map((s) => s.role));
+  check('every required slot type is placed', need.every((t) => roles.has(t)));
+
+  // The validator must FLAG unreachability — prove it catches a broken map, not
+  // just that it passes good ones. Wall off the exit's neighborhood by hand.
+  {
+    const bad = JSON.parse(JSON.stringify(m1));
+    const { w, h } = bad.grid;
+    const { x: ex, y: ey } = bad.exit;
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const x = ex + dx, y = ey + dy;
+        if (x >= 0 && x < w && y >= 0 && y < h) bad.grid.tiles[y * w + x] = 0;
+      }
+    }
+    const probs = validateMap(bad, DEFAULT_SPEC);
+    check('validator FLAGS a hand-broken map (exit walled off)', probs.some((p) => p.includes('unreachable')));
+  }
+
+  // And a disconnected required slot (not just the exit) is caught too.
+  {
+    const bad = JSON.parse(JSON.stringify(m1));
+    const { w, h } = bad.grid;
+    const key = bad.slots.find((s) => s.role === 'key');
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const x = key.x + dx, y = key.y + dy;
+        if (x >= 0 && x < w && y >= 0 && y < h) bad.grid.tiles[y * w + x] = 0;
+      }
+    }
+    const probs = validateMap(bad, DEFAULT_SPEC);
+    check('validator FLAGS a disconnected required slot', probs.some((p) => p.includes("slot 'key'") && p.includes('unreachable')));
+  }
+}
+
 // --- content table validation (real content, when it exists) -----------------
-// P3+ will import ../src/sim/content.js and assertValid here.
+// P4+ will import ../src/sim/content.js and assertValid here.
 
 console.log(`\n${passed} checks passed, ${failures.length} failed.`);
 if (failures.length) process.exit(1);
