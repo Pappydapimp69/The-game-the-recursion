@@ -61,6 +61,14 @@ export function makeWorld(seed = 'recursion', options = {}) {
     // salience selection needs so the voice doesn't loop the same top beat.
     director: { lastPlayed: {} },
 
+    // The quest the encounter-echo sets: lost voices scattered through the deep,
+    // to be gathered and delivered. `delivered` is authoritative and safe (banked
+    // through DELIVER_ECHOES); what you're still CARRYING is presentation and at
+    // risk from the hunter (P16). total is the content-defined count of lost
+    // voices to find. Kept OUT of fingerprintOf (the demo never delivers, so the
+    // golden hash is unaffected; the spine test covers determinism here).
+    quest: { delivered: 0, total: options.echoTotal || 0 },
+
     // Cinematic mode, tracked in ONE place: activeId is the scene playing (null
     // = gameplay). The presentation cutscene-player sets/clears it via a single
     // MARK_CUTSCENE command with one exit path (test#E6). Kept OUT of

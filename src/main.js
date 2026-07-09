@@ -23,10 +23,10 @@ import { exportSaga } from './sim/saga.js';
 import { gen, DEFAULT_SPEC, GEN_VERSION } from './sim/procgen.js';
 import { buildFacts, selectBeat } from './sim/director.js';
 import { axisRead } from './sim/playermodel.js';
-import { BEATS, CHOICE_POINTS, ENDINGS } from './sim/content.js';
+import { BEATS, CHOICE_POINTS, ENDINGS, ECHO_COUNT } from './sim/content.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p13';
+const BUILD_ID = 'p15';
 
 const STAGE_TIMING = {
   intro: { totalMs: 2400, letterbox: { inMs: 400, outMs: 400, height: 0.16 },
@@ -67,7 +67,14 @@ let title = createTitleScreen({
 });
 
 function dispatch(cmd) { return world ? reduce(world, cmd) : []; }
-function newWorld(opts) { return makeWorld('recursion', { ...opts, totalChoicePoints: CHOICE_POINTS.length }); }
+function newWorld(opts) {
+  // The seed varies per run (chosen here in the app layer — the sim never rolls
+  // ambient randomness) so every descent generates a DIFFERENT map, then is
+  // stored in world.seed so that run stays reproducible. e2e/tests can pass a
+  // fixed opts.seed for a stable map.
+  const seed = (opts && opts.seed) || `deep-${Date.now()}`;
+  return makeWorld(seed, { ...opts, totalChoicePoints: CHOICE_POINTS.length, echoTotal: ECHO_COUNT });
+}
 
 // One place a run starts: build the world AND its sprite sheet (seeded from the
 // same seed, so the art is as reproducible as the map), then enter the intro.
@@ -76,6 +83,13 @@ function startRun(opts) {
   sprites = makeSpriteSheet({ seed: world.seed });
   audio.setChord('intro'); audio.setMood(0.15);
   beginIntro();
+}
+
+// Bank whatever lost voices the player is carrying — safe, authoritative.
+function deliverCarried() {
+  if (!explore) return;
+  const n = explore.takeCarried();
+  if (n > 0) { dispatch({ type: 'DELIVER_ECHOES', n }); audio.chime(); }
 }
 
 // --- cutscene plumbing (unchanged from P6) ----------------------------------
@@ -121,11 +135,19 @@ function beginLearning() {
   audio.setChord('learning'); audio.setMood(0.35);
   learningMap = gen(world.seed, GEN_VERSION, DEFAULT_SPEC);
   explore = createExplore(learningMap, CHOICE_POINTS, {
-    onReachChoice: (assignment) => openChoice(assignment.cp, () => {
-      explore.resolveChoice(assignment);
-      mode = 'explore';
-    }, (opt) => dispatch({ type: 'CHOOSE_OPTION', pointId: assignment.cp.id, axis: opt.axis, weight: opt.weight })),
+    echoCount: ECHO_COUNT,
+    onGather: () => audio.confirm(), // a soft note as a lost voice is taken up
+    onReachChoice: (assignment) => {
+      // The encounter-echo is the quest-giver: reaching it also banks whatever
+      // you carried this far, safe from the hunter.
+      if (assignment.slot && assignment.slot.role === 'encounter') deliverCarried();
+      openChoice(assignment.cp, () => {
+        explore.resolveChoice(assignment);
+        mode = 'explore';
+      }, (opt) => dispatch({ type: 'CHOOSE_OPTION', pointId: assignment.cp.id, axis: opt.axis, weight: opt.weight }));
+    },
     onReachExit: () => {
+      deliverCarried(); // carry everything else up as you leave
       dispatch({ type: 'ADVANCE_SPINE' }); // learning(1) -> reveal(2)
       explore = null;
       beginReveal();
@@ -311,6 +333,20 @@ function renderExplore() {
     ctx.globalAlpha = 1;
   }
 
+  // Lost voices to gather: small pulsing motes on the floor. Taken ones vanish
+  // (they're being carried); a soft ring marks each one still out there.
+  const mote = 0.5 + 0.5 * Math.sin(animMs / 220);
+  for (const c of explore.collectibles()) {
+    if (c.taken) continue;
+    const dx = c.x * TILE - camX + TILE / 2, dy = c.y * TILE - camY + TILE / 2;
+    ctx.globalAlpha = 0.4 + 0.5 * mote;
+    ctx.fillStyle = PALETTE.voice[2];
+    ctx.beginPath(); ctx.arc(dx, dy, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 0.18 + 0.2 * mote;
+    ctx.beginPath(); ctx.arc(dx, dy, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
   // Choice waypoints: an unmade choice glows (voice gold, gently pulsing); a made
   // one dims. The ENCOUNTER slot hosts a resident echo you approach to speak
   // with, so it reads as a creature, not a marker. The exit brightens only once
@@ -341,10 +377,14 @@ function renderExplore() {
   const frame = Math.floor(animMs / 380) & 1;
   drawEntity('diver', p.x * TILE - camX, p.y * TILE - camY, frame);
 
-  // HUD: what remains, and the live model.
+  // HUD: choices left, the lost-voices quest, and the live model.
   ctx.fillStyle = PALETTE.ink[1]; ctx.font = '9px ui-monospace, monospace';
   const rem = explore.remaining();
   ctx.fillText(rem > 0 ? `voices to hear: ${rem}` : 'the way out is open', 8, 16);
+  const carried = explore.carried();
+  const delivered = world.quest.delivered, total = world.quest.total;
+  ctx.fillStyle = PALETTE.voice[1];
+  ctx.fillText(`lost voices  saved ${delivered}/${total}` + (carried > 0 ? `  ·  carrying ${carried}` : ''), 8, 28);
   renderModelHud();
 }
 

@@ -95,6 +95,19 @@ export function reduce(state, cmd) {
       break;
     }
 
+    // Bank the lost voices you were carrying — the safe half of the collect
+    // loop. Only delivery is authoritative (and fingerprint-relevant to the
+    // finale/saga); carrying is presentation and at risk. Clamped to total so a
+    // double-deliver can't overcount.
+    case 'DELIVER_ECHOES': {
+      const n = Math.max(0, cmd.n | 0);
+      if (n > 0) {
+        state.quest.delivered = Math.min(state.quest.total, state.quest.delivered + n);
+        events.push({ t: 'delivered', delivered: state.quest.delivered, total: state.quest.total });
+      }
+      break;
+    }
+
     case 'RESTORE_FACET': {
       if (cmd.facet in state.facets) {
         state.facets[cmd.facet] = 1;

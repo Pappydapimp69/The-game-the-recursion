@@ -524,6 +524,22 @@ function runSpine(seed, choiceIdxs, endingIdx) {
   check('a self-cancelling player has no named dominant', wishyFacts.dominant === '');
   check('and draws the honestly-unsure reveal', selectBeat(wishyFacts, BEATS, { spineNode: 'reveal' }) === 'reveal-unsure');
 
+  // The lost-voices quest: DELIVER_ECHOES banks toward the total, clamps there,
+  // and a save-all run selects the deepened finale variant.
+  const q = makeWorld('quest', { totalChoicePoints: CHOICE_POINTS.length, echoTotal: 4 });
+  reduce(q, { type: 'DELIVER_ECHOES', n: 2 });
+  check('DELIVER_ECHOES banks delivered toward total', q.quest.delivered === 2 && q.quest.total === 4);
+  reduce(q, { type: 'DELIVER_ECHOES', n: 10 });
+  check('delivered clamps at total (no overcount)', q.quest.delivered === 4);
+  reduce(q, { type: 'END', choice: 'listen' });
+  const savedFacts = buildFacts(q);
+  check('quest.savedAll fact is true once all voices are delivered', savedFacts['quest.savedAll'] === true);
+  check('a save-all listen ending selects the deepened finale beat', selectBeat(savedFacts, BEATS, { spineNode: 'finale' }) === 'finale-listen-saved');
+  const none = makeWorld('quest-none', { echoTotal: 4 });
+  reduce(none, { type: 'END', choice: 'listen' });
+  check('a save-none run selects the base listen finale', selectBeat(buildFacts(none), BEATS, { spineNode: 'finale' }) === 'finale-listen');
+  check('saved echoes ride out in the saga export', exportSaga(q).length > 0 && JSON.parse(atob(exportSaga(q).split('.')[1])).savedEchoes === 4);
+
   // The learning-stage map is generated from world.seed via the SAME procgen
   // path main.js uses, and it's the pure/reproducible function P3 verified.
   const map = gen(w.seed, GEN_VERSION, DEFAULT_SPEC);

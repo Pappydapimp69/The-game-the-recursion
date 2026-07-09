@@ -33,6 +33,8 @@ export function exportSaga(state) {
     // The player-model the voice built this run, distilled to signed lean per
     // axis (the next game, if any, reads who you became here).
     model: distillModel(state.playerModel),
+    // How many lost voices you carried up out of the deep this run.
+    savedEchoes: (state.quest && state.quest.delivered) || 0,
     choices: {
       ravagerFate: state.flags.ravagerFate || '',   // Prologue
       riftChoice: state.flags.riftChoice || '',      // Wrong Sky

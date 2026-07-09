@@ -8,6 +8,10 @@
 // structurally so the mechanism never imports this file.
 export const SPINE_STAGE_NAMES = ['intro', 'learning', 'reveal', 'hollow', 'finale', 'done'];
 
+// The encounter-echo's quest: how many lost voices are scattered to be found and
+// delivered. A count, not instances — explore.js scatters this many on the map.
+export const ECHO_COUNT = 4;
+
 // "The learning": six choice points scattered across the map (the four interior
 // slots plus two more floor tiles), feeding four axes — with mercy and resolve
 // asked twice so a consistent player builds a lean the reveal can actually name.
@@ -109,7 +113,13 @@ export const BEATS = [
   { id: 'reveal-unsure', spineNode: 'reveal', criteria: [], tension: 0.5,
     lines: ["It shows you yourself, and holds it there a moment.", "It isn't sure yet what it's looking at. Neither, quite, are you."] },
 
-  // --- finale: shaped by the ending taken ---
+  // --- finale: shaped by the ending taken, deepened by the voices you saved ---
+  { id: 'finale-listen-saved', spineNode: 'finale', criteria: [{ key: 'arc.choice', eq: 'listen' }, { key: 'quest.savedAll', eq: true }], tension: 0.95,
+    lines: ['You let it speak — and it speaks in more than its own voice now, for you carried the drowned ones up with you.',
+      'A chorus goes to the surface where one figure went down. None of them casts a shadow but yours.'] },
+  { id: 'finale-silence-saved', spineNode: 'finale', criteria: [{ key: 'arc.choice', eq: 'silence' }, { key: 'quest.savedAll', eq: true }], tension: 0.9,
+    lines: ['You silence the one that wore you, but the lost voices you gathered you do not silence — you carry them out yourself.',
+      'The deep goes quiet behind you. What you brought up with you does not.'] },
   { id: 'finale-listen', spineNode: 'finale', criteria: [{ key: 'arc.choice', eq: 'listen' }], tension: 0.9,
     lines: ['You let it speak. Whatever comes next comes in a voice that is almost yours — close enough to trust, close enough to fear.',
       'The two of you go up together. Only one of you casts a shadow.'] },

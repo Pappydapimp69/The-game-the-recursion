@@ -28,6 +28,10 @@ export function buildFacts(world) {
   for (const [k, v] of Object.entries(world.facets)) facts[`facets.${k}`] = v;
   facts.imported = !!world.settings.imported;
   facts['arc.choice'] = world.arc.choice || '';
+  facts['quest.delivered'] = world.quest ? world.quest.delivered : 0;
+  facts['quest.total'] = world.quest ? world.quest.total : 0;
+  facts['quest.savedAll'] = !!(world.quest && world.quest.total > 0 && world.quest.delivered >= world.quest.total);
+  facts['quest.savedNone'] = !!(world.quest && world.quest.total > 0 && world.quest.delivered === 0);
 
   // The player's DOMINANT trait — the axis they leaned into hardest across the
   // whole learning, by ACCUMULATED weight (|sum|), not confidence. The reveal is

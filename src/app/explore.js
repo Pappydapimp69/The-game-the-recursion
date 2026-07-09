@@ -18,7 +18,7 @@ import { makeRng } from '../sim/rng.js';
 const STEP_MS = 108; // grid-step cadence while a direction is held
 const N_ECHOES = 4;  // ambient drifting voices that inhabit the space
 
-export function createExplore(map, choicePoints, { onReachChoice, onReachExit }) {
+export function createExplore(map, choicePoints, { onReachChoice, onReachExit, onGather, echoCount = 0 }) {
   const { w, h, tiles } = map.grid;
 
   // Give every choice point its OWN distinct position: the interior slots first
@@ -72,6 +72,23 @@ export function createExplore(map, choicePoints, { onReachChoice, onReachExit })
       echoes.push({ x: fx + 0.5, y: fy + 0.5, phase: erng.float() * 6.283, sp: 0.6 + erng.float() * 0.5 });
     }
   }
+  // Lost voices — the encounter-echo's quest. Stationary motes scattered on
+  // floor tiles distinct from the choice positions/entry/exit. Walk onto one to
+  // CARRY it (presentation, at risk); deliver at the encounter or exit to bank
+  // it (authoritative). Seeded placement so a run's quest is reproducible.
+  const collectibles = [];
+  {
+    const used = new Set(positions.map((s) => s.x + ',' + s.y));
+    used.add(map.entry.x + ',' + map.entry.y); used.add(map.exit.x + ',' + map.exit.y);
+    const spare = [];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (tiles[y * w + x] === FLOOR && !used.has(x + ',' + y)) spare.push({ x, y });
+    }
+    makeRng(`${map.seed}:${map.attempt}:echoquest`).shuffle(spare);
+    for (let i = 0; i < echoCount && spare.length; i++) { const t = spare.pop(); collectibles.push({ x: t.x, y: t.y, taken: false, home: { x: t.x, y: t.y } }); }
+  }
+  let carried = 0;
+
   const allChoicesDone = () => assignments.every((a) => a.done);
 
   // After any step, see what the player is standing on. A pending choice fires
@@ -80,6 +97,10 @@ export function createExplore(map, choicePoints, { onReachChoice, onReachExit })
   let resolving = false;
   function checkTriggers() {
     if (resolving) return;
+    // Pick up a lost voice you're standing on (doesn't interrupt movement).
+    for (const c of collectibles) {
+      if (!c.taken && player.x === c.x && player.y === c.y) { c.taken = true; carried += 1; if (onGather) onGather(carried); }
+    }
     for (const a of assignments) {
       if (!a.done && player.x === a.slot.x && player.y === a.slot.y) {
         resolving = true;
@@ -143,5 +164,15 @@ export function createExplore(map, choicePoints, { onReachChoice, onReachExit })
     remaining: () => assignments.filter((a) => !a.done).length,
     atExitReady: () => allChoicesDone(),
     isWalkable: walkable,
+    // The lost-voices quest.
+    collectibles: () => collectibles,
+    carried: () => carried,
+    takeCarried: () => { const n = carried; carried = 0; return n; }, // deliver: hand off carried to be banked
+    // The hunter's stakes (P16): drop everything you're carrying back onto the
+    // map at the voices' home tiles, and send the diver back to the entry.
+    scatterCarried: () => {
+      if (carried > 0) { for (const c of collectibles) if (c.taken) c.taken = false; carried = 0; }
+    },
+    respawnToEntry: () => { player.x = map.entry.x; player.y = map.entry.y; stepCd = 0; resolving = false; },
   };
 }
