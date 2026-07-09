@@ -26,7 +26,7 @@ import { axisRead } from './sim/playermodel.js';
 import { BEATS, CHOICE_POINTS, ENDINGS, ECHO_COUNT } from './sim/content.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p17';
+const BUILD_ID = 'p18';
 
 const STAGE_TIMING = {
   intro: { totalMs: 2400, letterbox: { inMs: 400, outMs: 400, height: 0.16 },
@@ -44,15 +44,20 @@ ctx.imageSmoothingEnabled = false;
 // The canvas's 320x240 attributes are its native pixel BUFFER, not its display
 // size — CSS `max-width/height: 100%` is only a ceiling, so with no explicit
 // CSS size the canvas rendered at a literal 320x240 CSS-pixel box, tiny on any
-// real screen. Scale it up to fill the viewport instead: fit the CONSTRAINING
-// (shorter) axis (waiting-city#E7 — a formula that only looks at one axis
-// over-zooms or under-fills depending on orientation), at an INTEGER factor so
-// nearest-neighbor pixel art stays crisp (no fractional-pixel blur). A small
-// fractional allowance keeps portrait phones (which cap in the low 1.x range
-// on integer-only scaling) from sitting oddly small.
+// real screen. Scale it up to fill the AVAILABLE space instead: measure the
+// #stage container's own post-layout box (its clientWidth/clientHeight), not
+// the raw window — #stage is what's actually left after the HUD row below it
+// takes its own space, so this stays correct no matter what else shares the
+// page, rather than hardcoding one bar's height as a magic-number subtraction.
+// Fit the CONSTRAINING (shorter) axis (waiting-city#E7 — a formula that only
+// looks at one axis over-zooms or under-fills depending on orientation), at an
+// INTEGER factor so nearest-neighbor pixel art stays crisp (no fractional-pixel
+// blur). A small fractional allowance keeps portrait phones (which cap in the
+// low 1.x range on integer-only scaling) from sitting oddly small.
+const stage = document.getElementById('stage');
 function fitCanvas() {
-  const vw = window.innerWidth, vh = window.innerHeight;
-  const raw = Math.min(vw / canvas.width, vh / canvas.height);
+  const aw = stage.clientWidth, ah = stage.clientHeight;
+  const raw = Math.min(aw / canvas.width, ah / canvas.height);
   const scale = raw >= 2 ? Math.floor(raw) : Math.max(1, Math.round(raw * 4) / 4);
   canvas.style.width = `${Math.round(canvas.width * scale)}px`;
   canvas.style.height = `${Math.round(canvas.height * scale)}px`;

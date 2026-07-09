@@ -96,6 +96,29 @@ export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf 
     };
   }
 
+  const CAPTION_FONT = '10px ui-monospace, monospace';
+  const LINE_H = 12;
+  const MARGIN = 12;
+
+  // Greedy word-wrap to the canvas's own width. A caption is authored as one
+  // sentence-length string (this repo's captions run well past what fits on
+  // one line at this font/width) — with no wrap, fillText simply draws past
+  // the canvas edge and the tail is gone, invisible only because the canvas
+  // used to render too small to notice. ctx.font must already be set by the
+  // caller (draw() sets it right before calling this).
+  function wrapLines(ctx, text, maxWidth) {
+    const words = String(text).split(' ');
+    const lines = [];
+    let line = '';
+    for (const word of words) {
+      const test = line ? line + ' ' + word : word;
+      if (line && ctx.measureText(test).width > maxWidth) { lines.push(line); line = word; }
+      else line = test;
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
   function draw(ctx) {
     const W = ctx.canvas.width, H = ctx.canvas.height;
     const c = cosmetics();
@@ -106,17 +129,30 @@ export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf 
         if (elapsed % (p.life + 1) < p.life) ctx.fillRect(p.x, p.y, 2, 2);
       }
     }
-    // Letterbox bars, drawn LAST in screen space (integer-snapped, no smoothing).
+
+    ctx.font = CAPTION_FONT;
+    const lines = c.caption ? wrapLines(ctx, c.caption, W - MARGIN * 2) : [];
+
+    // Letterbox bars, drawn LAST in screen space (integer-snapped, no
+    // smoothing). The bottom bar grows to fit however many wrapped lines the
+    // CURRENT caption needs (never clipped, never fixed at one authored
+    // height) — the top bar stays the authored/animated height for symmetry
+    // during fade-in.
     if (c.letterbox > 0) {
       const bar = Math.round(H * c.letterbox);
+      const bottomBar = Math.max(bar, lines.length ? lines.length * LINE_H + 18 : 0);
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, W, bar);
-      ctx.fillRect(0, H - bar, W, bar);
+      ctx.fillRect(0, H - bottomBar, W, bottomBar);
     }
-    if (c.caption) {
+
+    if (lines.length) {
       ctx.fillStyle = '#e6e9f2';
-      ctx.font = '10px ui-monospace, monospace';
-      ctx.fillText(c.caption, 12, H - 14);
+      ctx.font = CAPTION_FONT;
+      // Anchor the LAST line near the bottom and grow upward, so however many
+      // lines a caption wraps to, every one stays inside the canvas.
+      let y = H - 14 - (lines.length - 1) * LINE_H;
+      for (const line of lines) { ctx.fillText(line, MARGIN, y); y += LINE_H; }
     }
   }
 

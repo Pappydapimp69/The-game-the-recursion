@@ -7,19 +7,26 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%8C%80%3C/text%3E%3C/svg%3E" />
   <style>
     :root { color-scheme: dark; }
-    html, body { margin: 0; padding: 0; background: #07080c; color: #cdd3e0; overflow: hidden; }
-    /* 100dvh/dvw so bottom-anchored UI survives mobile chrome (wrong-sky#E7). */
-    #stage { width: 100dvw; height: 100dvh; width: 100vw; height: 100vh;
+    /* 100dvh/dvw so the whole layout survives mobile chrome (wrong-sky#E7). */
+    html, body { margin: 0; padding: 0; background: #07080c; color: #cdd3e0; overflow: hidden;
+      height: 100vh; height: 100dvh; }
+    /* body is a column: #stage takes all space BUT the HUD row, #build gets its
+       own reserved row below it — never overlapping (a `position: fixed` HUD
+       used to float ON TOP of the canvas, invisibly overlapping the exact
+       bottom rows a cutscene caption is drawn in, once the canvas was scaled
+       large enough to reach the viewport edge). */
+    body { display: flex; flex-direction: column; }
+    #stage { flex: 1 1 auto; min-height: 0; width: 100vw; width: 100dvw;
       display: flex; align-items: center; justify-content: center; }
     canvas { image-rendering: pixelated; background: #05060a; touch-action: none;
       max-width: 100%; max-height: 100%; }
-    #build { position: fixed; left: 6px; bottom: 4px; font: 10px/1.2 ui-monospace, monospace;
+    #build { flex: 0 0 auto; padding: 4px 6px; font: 10px/1.2 ui-monospace, monospace;
       color: #45506a; pointer-events: none; user-select: none; }
   </style>
 </head>
 <body>
   <div id="stage"><canvas id="screen" width="320" height="240"></canvas></div>
   <div id="build">the recursion · loading…</div>
-  <script type="module" src="./src/main.js?v=p17"></script>
+  <script type="module" src="./src/main.js?v=p18"></script>
 </body>
 </html>
