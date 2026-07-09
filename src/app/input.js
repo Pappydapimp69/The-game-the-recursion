@@ -52,6 +52,7 @@ export function createInput(target = (typeof window !== 'undefined' ? window : n
 
   // gamepad edge state
   let prevButtons = [];
+  let gamepadConnected = false;
   let stickAxis = [0, 0];
   let lastStickNavAt = { x: -1e9, y: -1e9 };
 
@@ -96,9 +97,14 @@ export function createInput(target = (typeof window !== 'undefined' ? window : n
     const pads = (typeof navigator !== 'undefined' && navigator.getGamepads) ? navigator.getGamepads() : [];
     let gp = null;
     for (const p of pads) { if (p) { gp = p; break; } }
-    if (!gp) return null;
+    if (!gp) { gamepadConnected = false; return null; }
+    gamepadConnected = true;
 
-    // Edge-detect every button so no press between polls is lost.
+    // Edge-detect every button so no press between polls is lost. `prevButtons`
+    // doubles as this frame's HELD state after the loop below (it's read back
+    // by isHeld() for hold-to-dismiss gestures — the-game-prologue#E7 wants an
+    // authoritative "is it down right now", not inference from press/release
+    // timing).
     const btns = gp.buttons.map((b) => (typeof b === 'object' ? b.pressed : b > 0.5));
     for (let i = 0; i < btns.length; i++) {
       if (btns[i] && !prevButtons[i]) pushPress(GP_PRESS[i], 'gamepad');
@@ -133,9 +139,22 @@ export function createInput(target = (typeof window !== 'undefined' ? window : n
     return out;
   }
 
+  // Continuous HELD state for one named press, for gestures that must be a
+  // deliberate hold rather than a tap (e.g. cutscene skip — a bare tap can
+  // accidentally eat a story beat; wrong-sky precedent, the-game-prologue#E7).
+  // Reverse-looks-up the same KEY_PRESS/GP_PRESS tables `sample`/keydown use,
+  // so a hold check is never a second source of truth for what a button means.
+  function isHeld(name) {
+    for (const k of heldKeys) { if (KEY_PRESS[k] === name) return true; }
+    if (gamepadConnected) {
+      for (let i = 0; i < prevButtons.length; i++) { if (prevButtons[i] && GP_PRESS[i] === name) return true; }
+    }
+    return false;
+  }
+
   // Test/touch hooks — the harness is just another device.
   function injectPress(name) { pushPress(name, activeDevice === 'gamepad' ? 'gamepad' : 'keyboard'); }
   function setTouchMove(vec) { touchMove = [Math.sign(vec[0] || 0), Math.sign(vec[1] || 0)]; }
 
-  return { sample, takePresses, injectPress, setTouchMove, device: () => activeDevice };
+  return { sample, takePresses, injectPress, setTouchMove, isHeld, device: () => activeDevice };
 }

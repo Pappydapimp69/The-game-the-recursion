@@ -24,9 +24,18 @@ import { gen, DEFAULT_SPEC, GEN_VERSION } from './sim/procgen.js';
 import { buildFacts, selectBeat } from './sim/director.js';
 import { axisRead } from './sim/playermodel.js';
 import { BEATS, CHOICE_POINTS, ENDINGS, ECHO_COUNT } from './sim/content.js';
+import { labelFor } from './app/device-labels.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p18';
+const BUILD_ID = 'p19';
+
+// A cutscene shares its skip control with nothing else, but a bare tap can
+// still eat a story beat by accident — require a deliberate ~1.2s HOLD instead
+// (wrong-sky precedent, freshly written back to memory). The counter is
+// AUTHORITATIVE: it only grows while input.isHeld('skip') reads true this
+// frame and snaps to 0 the instant it doesn't — never inferred from how long
+// ago the button was released (the-game-prologue#E7).
+const HOLD_DISMISS_MS = 1200;
 
 const STAGE_TIMING = {
   intro: { totalMs: 2400, letterbox: { inMs: 400, outMs: 400, height: 0.16 },
@@ -83,6 +92,7 @@ let sagaCode = '';
 let sprites = null;       // the procedural sprite sheet, set once a world exists (P9)
 let cutsceneNode = '';    // which spine node the active cutscene visualizes (P12)
 let lastFrameMs = 0;      // cutscene's own capped-delta clock
+let cutsceneHoldMs = 0;   // authoritative hold-to-skip counter (p19)
 let prevMs = 0;           // general per-frame delta for exploration
 let animMs = 0;           // free-running clock for idle animation
 let caughtFlash = 0;      // ms remaining on the red 'caught' vignette (P16)
@@ -136,6 +146,7 @@ function startCutscene(scene, onEnd) {
   const rng = subStream(seedState(world.rng.join(':')), 'cutscene:' + scene.id);
   cutscene = createCutscenePlayer(scene, { dispatch, rng });
   lastFrameMs = 0;
+  cutsceneHoldMs = 0;
   cutsceneOnEnd = onEnd;
   cutsceneNode = scene.id.split(':')[0];
   audio.chime(); // a soft stinger as a beat opens
@@ -245,8 +256,16 @@ function tickFrame(nowMs) {
   if (mode === 'title') {
     title.handlePresses(presses);
   } else if (mode === 'cutscene') {
-    if (presses.includes('skip')) cutscene.skip();
-    else { const cdt = lastFrameMs ? nowMs - lastFrameMs : 0; cutscene.advance(cdt); }
+    if (input.isHeld('skip')) {
+      cutsceneHoldMs += dt;
+      if (cutsceneHoldMs >= HOLD_DISMISS_MS) cutscene.skip();
+    } else {
+      cutsceneHoldMs = 0;
+    }
+    if (!cutscene.isEnded()) {
+      const cdt = lastFrameMs ? nowMs - lastFrameMs : 0;
+      cutscene.advance(cdt);
+    }
     lastFrameMs = nowMs;
     if (cutscene.isEnded()) endCutscene();
   } else if (mode === 'explore') {
@@ -548,13 +567,36 @@ function renderCutsceneEntity(node, tMs, totalMs) {
   ctx.restore();
 }
 
+// Hold-to-skip hint + progress bar, in the ACTIVE device's own language (never
+// baked at construct time — the-game-prologue#E3/#E6). The bar only appears
+// once the player has actually started holding, so it doesn't clutter a
+// cutscene someone's just watching.
+function renderHoldToSkip(device) {
+  const W = canvas.width;
+  ctx.font = '8px ui-monospace, monospace';
+  ctx.fillStyle = PALETTE.ink[3];
+  ctx.textAlign = 'right';
+  ctx.fillText(`hold ${labelFor(device, 'skip')} to skip`, W - 8, 14);
+  ctx.textAlign = 'left';
+  if (cutsceneHoldMs > 0) {
+    const frac = Math.min(1, cutsceneHoldMs / HOLD_DISMISS_MS);
+    const barW = 60, barH = 4, bx = W - 8 - barW, by = 18;
+    ctx.fillStyle = PALETTE.ink[3]; ctx.fillRect(bx, by, barW, barH);
+    ctx.fillStyle = PALETTE.voice[1]; ctx.fillRect(bx, by, barW * frac, barH);
+  }
+}
+
 const buildEl = document.getElementById('build');
 function render(nowMs) {
   const device = tickFrame(nowMs);
   if (mode === 'title') renderTitle(device);
   else if (mode === 'cutscene') {
     ctx.fillStyle = PALETTE.void; ctx.fillRect(0, 0, canvas.width, canvas.height);
-    if (cutscene) { renderCutsceneEntity(cutsceneNode, cutscene.elapsedMs(), STAGE_TIMING[cutsceneNode] ? STAGE_TIMING[cutsceneNode].totalMs : 2400); cutscene.draw(ctx); }
+    if (cutscene) {
+      renderCutsceneEntity(cutsceneNode, cutscene.elapsedMs(), STAGE_TIMING[cutsceneNode] ? STAGE_TIMING[cutsceneNode].totalMs : 2400);
+      cutscene.draw(ctx);
+      renderHoldToSkip(device);
+    }
   }
   else if (mode === 'explore') renderExplore();
   else if (mode === 'choice') renderChoice(device);
