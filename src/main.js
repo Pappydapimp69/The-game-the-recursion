@@ -27,7 +27,7 @@ import { BEATS, CHOICE_POINTS, ENDINGS, ECHO_COUNT } from './sim/content.js';
 import { labelFor } from './app/device-labels.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p19';
+const BUILD_ID = 'p20';
 
 // A cutscene shares its skip control with nothing else, but a bare tap can
 // still eat a story beat by accident — require a deliberate ~1.2s HOLD instead
@@ -36,6 +36,14 @@ const BUILD_ID = 'p19';
 // frame and snaps to 0 the instant it doesn't — never inferred from how long
 // ago the button was released (the-game-prologue#E7).
 const HOLD_DISMISS_MS = 1200;
+
+// Cutscenes play out at a QUARTER of their authored pace — the letterbox
+// bars, the entity's breathing/scale animation, and the caption typewriter
+// (cutscene-player.js) are all driven off the SAME internal elapsed clock, so
+// scaling the real-time delta fed into it is the one lever that slows
+// everything in lockstep, rather than four separate speed knobs drifting out
+// of sync with each other.
+const CUTSCENE_SPEED = 0.25;
 
 const STAGE_TIMING = {
   intro: { totalMs: 2400, letterbox: { inMs: 400, outMs: 400, height: 0.16 },
@@ -93,6 +101,7 @@ let sprites = null;       // the procedural sprite sheet, set once a world exist
 let cutsceneNode = '';    // which spine node the active cutscene visualizes (P12)
 let lastFrameMs = 0;      // cutscene's own capped-delta clock
 let cutsceneHoldMs = 0;   // authoritative hold-to-skip counter (p19)
+let cutsceneSkipped = false; // true only when THIS scene ended via hold-to-skip, not the natural clock
 let prevMs = 0;           // general per-frame delta for exploration
 let animMs = 0;           // free-running clock for idle animation
 let caughtFlash = 0;      // ms remaining on the red 'caught' vignette (P16)
@@ -147,6 +156,7 @@ function startCutscene(scene, onEnd) {
   cutscene = createCutscenePlayer(scene, { dispatch, rng });
   lastFrameMs = 0;
   cutsceneHoldMs = 0;
+  cutsceneSkipped = false;
   cutsceneOnEnd = onEnd;
   cutsceneNode = scene.id.split(':')[0];
   audio.chime(); // a soft stinger as a beat opens
@@ -258,16 +268,20 @@ function tickFrame(nowMs) {
   } else if (mode === 'cutscene') {
     if (input.isHeld('skip')) {
       cutsceneHoldMs += dt;
-      if (cutsceneHoldMs >= HOLD_DISMISS_MS) cutscene.skip();
+      if (cutsceneHoldMs >= HOLD_DISMISS_MS) { cutscene.skip(); cutsceneSkipped = true; }
     } else {
       cutsceneHoldMs = 0;
     }
     if (!cutscene.isEnded()) {
-      const cdt = lastFrameMs ? nowMs - lastFrameMs : 0;
+      const cdt = lastFrameMs ? (nowMs - lastFrameMs) * CUTSCENE_SPEED : 0;
       cutscene.advance(cdt);
     }
     lastFrameMs = nowMs;
-    if (cutscene.isEnded()) endCutscene();
+    // A deliberate hold-to-skip advances immediately (the player already made
+    // the call). Reaching the end NATURALLY never auto-advances on its own —
+    // it waits for an explicit confirm, so nobody gets yanked into the next
+    // beat mid-read just because the clock ran out.
+    if (cutscene.isEnded() && (cutsceneSkipped || presses.includes('confirm'))) endCutscene();
   } else if (mode === 'explore') {
     // The player's inquiry lean is the echoes' curiosity: a curious diver draws
     // the drifting voices close, a direct/guarded one keeps them at bay.
@@ -567,23 +581,29 @@ function renderCutsceneEntity(node, tMs, totalMs) {
   ctx.restore();
 }
 
-// Hold-to-skip hint + progress bar, in the ACTIVE device's own language (never
-// baked at construct time — the-game-prologue#E3/#E6). The bar only appears
-// once the player has actually started holding, so it doesn't clutter a
-// cutscene someone's just watching.
+// Cutscene control hint, in the ACTIVE device's own language (never baked at
+// construct time — the-game-prologue#E3/#E6). Two distinct states: mid-scene
+// it's a hold-to-skip hint + progress bar (the bar only appears once the
+// player has actually started holding, so it doesn't clutter a cutscene
+// someone's just watching); once the scene has fully played out, skip is
+// moot and it becomes a plain "continue" prompt instead.
 function renderHoldToSkip(device) {
   const W = canvas.width;
   ctx.font = '8px ui-monospace, monospace';
   ctx.fillStyle = PALETTE.ink[3];
   ctx.textAlign = 'right';
-  ctx.fillText(`hold ${labelFor(device, 'skip')} to skip`, W - 8, 14);
-  ctx.textAlign = 'left';
-  if (cutsceneHoldMs > 0) {
-    const frac = Math.min(1, cutsceneHoldMs / HOLD_DISMISS_MS);
-    const barW = 60, barH = 4, bx = W - 8 - barW, by = 18;
-    ctx.fillStyle = PALETTE.ink[3]; ctx.fillRect(bx, by, barW, barH);
-    ctx.fillStyle = PALETTE.voice[1]; ctx.fillRect(bx, by, barW * frac, barH);
+  if (cutscene.isEnded()) {
+    ctx.fillText(`${labelFor(device, 'confirm')} to continue`, W - 8, 14);
+  } else {
+    ctx.fillText(`hold ${labelFor(device, 'skip')} to skip`, W - 8, 14);
+    if (cutsceneHoldMs > 0) {
+      const frac = Math.min(1, cutsceneHoldMs / HOLD_DISMISS_MS);
+      const barW = 60, barH = 4, bx = W - 8 - barW, by = 18;
+      ctx.fillStyle = PALETTE.ink[3]; ctx.fillRect(bx, by, barW, barH);
+      ctx.fillStyle = PALETTE.voice[1]; ctx.fillRect(bx, by, barW * frac, barH);
+    }
   }
+  ctx.textAlign = 'left';
 }
 
 const buildEl = document.getElementById('build');
@@ -617,7 +637,7 @@ window.__game = {
   forceBegin: (opts) => startRun(opts),
   runScript: (seed = 'recursion-smoke') => { world = makeWorld(seed); for (const c of demoScript()) reduce(world, c); return fingerprint(fingerprintOf(world)); },
   cutscene: () => (cutscene ? { id: cutscene.sceneId, elapsedMs: cutscene.elapsedMs(), firedCount: cutscene.firedCount(), ended: cutscene.isEnded(), cosmetics: cutscene.cosmetics() } : null),
-  skipCutscene: () => { if (cutscene) cutscene.skip(); },
+  skipCutscene: () => { if (cutscene) { cutscene.skip(); cutsceneSkipped = true; } },
   cutsceneActiveId: () => (world ? world.cutscene.activeId : null),
   // Exploration hooks for e2e: read the player tile, force-walk to a slot.
   explore: () => (explore ? { player: explore.player(), remaining: explore.remaining(), atExitReady: explore.atExitReady(),

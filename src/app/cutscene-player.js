@@ -90,15 +90,23 @@ export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf 
   function cosmetics() {
     const ms = captionMsOf ? captionMsOf() : elapsed;
     const tracks = scene.cosmeticTracks || {};
+    const cap = activeCaptionEntry(tracks.captions, ms);
     return {
       letterbox: letterboxFrac(tracks.letterbox, elapsed, scene.totalMs),
-      caption: activeCaption(tracks.captions, ms),
+      caption: cap.text,
+      captionAtMs: cap.atMs,
     };
   }
 
   const CAPTION_FONT = '10px ui-monospace, monospace';
   const LINE_H = 12;
   const MARGIN = 12;
+  // Typewriter reveal rate, in characters per 1000 units of the scene's OWN
+  // elapsed clock — NOT per real-world ms. main.js feeds this player a
+  // slowed-down dt (its CUTSCENE_SPEED knob), so the reveal automatically
+  // paces with whatever real-time speed the caller chooses, with no second
+  // knob to keep in sync.
+  const CHARS_PER_SEC = 90;
 
   // Greedy word-wrap to the canvas's own width. A caption is authored as one
   // sentence-length string (this repo's captions run well past what fits on
@@ -131,28 +139,33 @@ export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf 
     }
 
     ctx.font = CAPTION_FONT;
-    const lines = c.caption ? wrapLines(ctx, c.caption, W - MARGIN * 2) : [];
+    // Word-wrap against the FULL line first — line-break points must stay
+    // fixed for the whole reveal, or text would visibly reflow as it types.
+    const fullLines = c.caption ? wrapLines(ctx, c.caption, W - MARGIN * 2) : [];
+    const ms = captionMsOf ? captionMsOf() : elapsed;
+    const revealChars = c.caption ? Math.floor(Math.max(0, ms - c.captionAtMs) * CHARS_PER_SEC / 1000) : 0;
+    const shownLines = revealLines(fullLines, revealChars);
 
     // Letterbox bars, drawn LAST in screen space (integer-snapped, no
-    // smoothing). The bottom bar grows to fit however many wrapped lines the
-    // CURRENT caption needs (never clipped, never fixed at one authored
-    // height) — the top bar stays the authored/animated height for symmetry
-    // during fade-in.
+    // smoothing). The bottom bar is sized off the FULL line count (its
+    // eventual, not currently-revealed, size) so it doesn't grow mid-type —
+    // the top bar stays the authored/animated height for symmetry during
+    // fade-in.
     if (c.letterbox > 0) {
       const bar = Math.round(H * c.letterbox);
-      const bottomBar = Math.max(bar, lines.length ? lines.length * LINE_H + 18 : 0);
+      const bottomBar = Math.max(bar, fullLines.length ? fullLines.length * LINE_H + 18 : 0);
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, W, bar);
       ctx.fillRect(0, H - bottomBar, W, bottomBar);
     }
 
-    if (lines.length) {
+    if (shownLines.length) {
       ctx.fillStyle = '#e6e9f2';
       ctx.font = CAPTION_FONT;
-      // Anchor the LAST line near the bottom and grow upward, so however many
-      // lines a caption wraps to, every one stays inside the canvas.
-      let y = H - 14 - (lines.length - 1) * LINE_H;
-      for (const line of lines) { ctx.fillText(line, MARGIN, y); y += LINE_H; }
+      // Anchor off the FULL line count so each line's y-position is fixed
+      // from the moment it starts typing, not shifting as later lines appear.
+      let y = H - 14 - (fullLines.length - 1) * LINE_H;
+      for (const line of shownLines) { ctx.fillText(line, MARGIN, y); y += LINE_H; }
     }
   }
 
@@ -178,9 +191,26 @@ function letterboxFrac(lb, ms, totalMs) {
 
 // Active caption = the last one whose atMs has been reached. Existence-checked
 // (not truthy) so an empty-string caption is still valid (wrong-sky#E5).
-function activeCaption(captions, ms) {
-  if (!Array.isArray(captions)) return '';
-  let cur = '';
-  for (const c of captions) { if (c.atMs <= ms) cur = c.text; }
+// Returns the entry (text + its OWN atMs), so the typewriter reveal can time
+// itself from when THIS line started, not from scene start.
+function activeCaptionEntry(captions, ms) {
+  if (!Array.isArray(captions)) return { text: '', atMs: 0 };
+  let cur = { text: '', atMs: 0 };
+  for (const c of captions) { if (c.atMs <= ms) cur = c; }
   return cur;
+}
+
+// Truncate a set of already-fixed word-wrapped lines down to the first `n`
+// characters total (each line boundary counts as one character, matching the
+// join-with-space `wrapLines` collapsed) — lines beyond the cutoff are
+// dropped, not shown blank, so nothing pops in ahead of its turn.
+function revealLines(fullLines, n) {
+  const out = [];
+  let remaining = n;
+  for (const line of fullLines) {
+    if (remaining <= 0) break;
+    if (remaining >= line.length) { out.push(line); remaining -= line.length + 1; }
+    else { out.push(line.slice(0, remaining)); remaining = 0; }
+  }
+  return out;
 }
