@@ -26,7 +26,7 @@ import { axisRead } from './sim/playermodel.js';
 import { BEATS, CHOICE_POINTS, ENDINGS } from './sim/content.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p11';
+const BUILD_ID = 'p12';
 
 const STAGE_TIMING = {
   intro: { totalMs: 2400, letterbox: { inMs: 400, outMs: 400, height: 0.16 },
@@ -56,6 +56,7 @@ let explore = null;       // the active exploration space, or null
 let learningMap = null;
 let sagaCode = '';
 let sprites = null;       // the procedural sprite sheet, set once a world exists (P9)
+let cutsceneNode = '';    // which spine node the active cutscene visualizes (P12)
 let lastFrameMs = 0;      // cutscene's own capped-delta clock
 let prevMs = 0;           // general per-frame delta for exploration
 let animMs = 0;           // free-running clock for idle animation
@@ -96,6 +97,7 @@ function startCutscene(scene, onEnd) {
   cutscene = createCutscenePlayer(scene, { dispatch, rng });
   lastFrameMs = 0;
   cutsceneOnEnd = onEnd;
+  cutsceneNode = scene.id.split(':')[0];
   audio.chime(); // a soft stinger as a beat opens
   mode = 'cutscene';
 }
@@ -406,11 +408,60 @@ function wrapText(text, x, y, maxW, lineH) {
   if (line) ctx.fillText(line, x, ty);
 }
 
+// The cinematic layer: a single animated entity per beat, breathing and lit,
+// that visualizes the moment — the diver descending in the intro, the echo
+// swelling as the voice "shows you yourself" in the reveal, and a finale shaped
+// by YOUR ending. Driven off the cutscene's own elapsed clock, so the verified
+// determinism contract of the player is untouched (this only reads time).
+function renderCutsceneEntity(node, tMs, totalMs) {
+  const W = canvas.width, H = canvas.height;
+  const p = Math.max(0, Math.min(1, tMs / Math.max(1, totalMs)));
+  const ease = 1 - (1 - p) * (1 - p);
+  const breathe = 1 + 0.06 * Math.sin(tMs / 500);
+  const frame = Math.floor(tMs / 160) & 1;
+  const cx = W / 2;
+
+  let which = 'echo', ramp = 'voice', size = 52, cy = H / 2, alpha = 1, companion = null;
+  if (node === 'intro') {
+    which = 'diver'; ramp = 'diver';
+    cy = 52 + (H / 2 - 52) * ease; // descend from above into the deep
+    size = 46 * breathe;
+    alpha = 0.3 + 0.7 * Math.min(1, p * 2);
+  } else if (node === 'reveal') {
+    which = 'echo'; ramp = 'voice';
+    size = (38 + 26 * ease) * breathe; // grows as it takes your measure
+  } else if (node === 'finale') {
+    const listen = world && world.arc.choice === 'listen';
+    which = listen ? 'diver' : 'echo';
+    ramp = listen ? 'diver' : 'voice';
+    size = 50 * breathe;
+    if (listen) companion = 'echo';   // you let it speak: the two stand together
+    else alpha = 1 - 0.85 * ease;      // you silenced it: the voice fades out
+  }
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  // Soft glow: stacked translucent discs in the ramp's light shade.
+  const glow = PALETTE[ramp][2];
+  for (let i = 4; i >= 1; i--) {
+    ctx.globalAlpha = alpha * 0.06 * i;
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(cx, cy, (size * 0.6) * (i / 2.2), 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = alpha;
+  drawEntitySized(which, cx - size / 2, cy - size / 2, size, frame);
+  if (companion) drawEntitySized(companion, cx + size * 0.34, cy - size * 0.42, size * 0.74, frame ^ 1);
+  ctx.restore();
+}
+
 const buildEl = document.getElementById('build');
 function render(nowMs) {
   const device = tickFrame(nowMs);
   if (mode === 'title') renderTitle(device);
-  else if (mode === 'cutscene') { ctx.fillStyle = PALETTE.void; ctx.fillRect(0, 0, canvas.width, canvas.height); if (world) renderModelHud(); if (cutscene) cutscene.draw(ctx); }
+  else if (mode === 'cutscene') {
+    ctx.fillStyle = PALETTE.void; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (cutscene) { renderCutsceneEntity(cutsceneNode, cutscene.elapsedMs(), STAGE_TIMING[cutsceneNode] ? STAGE_TIMING[cutsceneNode].totalMs : 2400); cutscene.draw(ctx); }
+  }
   else if (mode === 'explore') renderExplore();
   else if (mode === 'choice') renderChoice(device);
   else if (mode === 'ended') renderEnded();
