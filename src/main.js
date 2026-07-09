@@ -16,6 +16,7 @@ import { createTitleScreen } from './app/title.js';
 import { createChoiceScreen } from './app/choice-screen.js';
 import { createCutscenePlayer } from './app/cutscene-player.js';
 import { createExplore } from './app/explore.js';
+import { makeSpriteSheet } from './app/sprites.js';
 import { PALETTE, shade } from './app/palette.js';
 import { exportSaga } from './sim/saga.js';
 import { gen, DEFAULT_SPEC, GEN_VERSION } from './sim/procgen.js';
@@ -23,7 +24,7 @@ import { buildFacts, selectBeat } from './sim/director.js';
 import { BEATS, CHOICE_POINTS, ENDINGS } from './sim/content.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p8';
+const BUILD_ID = 'p9';
 
 const STAGE_TIMING = {
   intro: { totalMs: 2400, letterbox: { inMs: 400, outMs: 400, height: 0.16 },
@@ -56,12 +57,20 @@ let prevMs = 0;           // general per-frame delta for exploration
 let animMs = 0;           // free-running clock for idle animation
 
 let title = createTitleScreen({
-  onBegin: (opts) => { world = newWorld(opts); beginIntro(); },
+  onBegin: (opts) => startRun(opts),
   promptForCode: () => window.prompt('Paste a saga code (or Cancel for a fresh start):'),
 });
 
 function dispatch(cmd) { return world ? reduce(world, cmd) : []; }
 function newWorld(opts) { return makeWorld('recursion', { ...opts, totalChoicePoints: CHOICE_POINTS.length }); }
+
+// One place a run starts: build the world AND its sprite sheet (seeded from the
+// same seed, so the art is as reproducible as the map), then enter the intro.
+function startRun(opts) {
+  world = newWorld(opts);
+  sprites = makeSpriteSheet({ seed: world.seed });
+  beginIntro();
+}
 
 // --- cutscene plumbing (unchanged from P6) ----------------------------------
 function makeBeatScene(spineNode) {
@@ -223,11 +232,27 @@ function drawTile(kind, tx, ty, sx, sy) {
   if (kind === 'floor') { ctx.fillStyle = PALETTE.stone[2]; ctx.fillRect(sx, sy, 1, 1); }
 }
 
+// Entities draw a touch larger than a tile and sit slightly high, so a walker
+// reads as standing ON the floor rather than boxed into a cell.
+const ENT = 15;
 function drawEntity(which, sx, sy, frame) {
-  if (sprites) { sprites.drawSprite(ctx, which, sx, sy, TILE, frame); return; }
+  const ox = sx - (ENT - TILE) / 2, oy = sy - (ENT - TILE) - 1;
+  if (sprites) { sprites.drawSprite(ctx, which, ox, oy, ENT, frame); return; }
   const ramp = which === 'diver' ? PALETTE.diver : which === 'hollow' ? PALETTE.hollow : PALETTE.voice;
   ctx.fillStyle = ramp[1]; ctx.fillRect(sx + 2, sy + 1, TILE - 4, TILE - 2);
   ctx.fillStyle = ramp[2]; ctx.fillRect(sx + 3, sy + 2, 2, 2);
+}
+
+// Is (x,y) a wall tile that borders at least one floor tile? Those are the only
+// walls worth drawing — the carved edge — so the screen reads as rooms hewn from
+// rock, not a solid field of wall texture.
+function isEdgeWall(tiles, w, h, x, y) {
+  if (x < 0 || x >= w || y < 0 || y >= h || tiles[y * w + x] === FLOOR) return false;
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
+    const nx = x + dx, ny = y + dy;
+    if (nx >= 0 && nx < w && ny >= 0 && ny < h && tiles[ny * w + nx] === FLOOR) return true;
+  }
+  return false;
 }
 
 function renderExplore() {
@@ -244,8 +269,9 @@ function renderExplore() {
   const y0 = Math.max(0, Math.floor(camY / TILE)), y1 = Math.min(h - 1, Math.ceil((camY + H) / TILE));
   for (let ty = y0; ty <= y1; ty++) {
     for (let tx = x0; tx <= x1; tx++) {
-      if (tiles[ty * w + tx] !== FLOOR) continue;
-      drawTile('floor', tx, ty, tx * TILE - camX, ty * TILE - camY);
+      const sx = tx * TILE - camX, sy = ty * TILE - camY;
+      if (tiles[ty * w + tx] === FLOOR) drawTile('floor', tx, ty, sx, sy);
+      else if (isEdgeWall(tiles, w, h, tx, ty)) drawTile('wall', tx, ty, sx, sy);
     }
   }
 
@@ -360,7 +386,7 @@ window.__game = {
   input,
   title,
   fingerprint: () => (world ? fingerprint(fingerprintOf(world)) : null),
-  forceBegin: (opts) => { world = newWorld(opts); beginIntro(); },
+  forceBegin: (opts) => startRun(opts),
   runScript: (seed = 'recursion-smoke') => { world = makeWorld(seed); for (const c of demoScript()) reduce(world, c); return fingerprint(fingerprintOf(world)); },
   cutscene: () => (cutscene ? { id: cutscene.sceneId, elapsedMs: cutscene.elapsedMs(), firedCount: cutscene.firedCount(), ended: cutscene.isEnded(), cosmetics: cutscene.cosmetics() } : null),
   skipCutscene: () => { if (cutscene) cutscene.skip(); },
