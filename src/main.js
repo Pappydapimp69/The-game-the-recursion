@@ -21,10 +21,11 @@ import { PALETTE, shade } from './app/palette.js';
 import { exportSaga } from './sim/saga.js';
 import { gen, DEFAULT_SPEC, GEN_VERSION } from './sim/procgen.js';
 import { buildFacts, selectBeat } from './sim/director.js';
+import { axisRead } from './sim/playermodel.js';
 import { BEATS, CHOICE_POINTS, ENDINGS } from './sim/content.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p9';
+const BUILD_ID = 'p10';
 
 const STAGE_TIMING = {
   intro: { totalMs: 2400, letterbox: { inMs: 400, outMs: 400, height: 0.16 },
@@ -186,7 +187,9 @@ function tickFrame(nowMs) {
     lastFrameMs = nowMs;
     if (cutscene.isEnded()) endCutscene();
   } else if (mode === 'explore') {
-    if (explore) explore.update(move, dt);
+    // The player's inquiry lean is the echoes' curiosity: a curious diver draws
+    // the drifting voices close, a direct/guarded one keeps them at bay.
+    if (explore) explore.update(move, dt, world ? axisRead('inquiry', world.playerModel.axes.inquiry).lean : 0);
   } else if (mode === 'choice') {
     if (choiceScreen) choiceScreen.handlePresses(presses);
   }
@@ -235,12 +238,18 @@ function drawTile(kind, tx, ty, sx, sy) {
 // Entities draw a touch larger than a tile and sit slightly high, so a walker
 // reads as standing ON the floor rather than boxed into a cell.
 const ENT = 15;
-function drawEntity(which, sx, sy, frame) {
-  const ox = sx - (ENT - TILE) / 2, oy = sy - (ENT - TILE) - 1;
-  if (sprites) { sprites.drawSprite(ctx, which, ox, oy, ENT, frame); return; }
+
+// Draw a creature sprite at an explicit size/position (used for echoes and any
+// non-tile-aligned entity). Falls back to a palette blob before sprites load.
+function drawEntitySized(which, sx, sy, size, frame) {
+  if (sprites) { sprites.drawSprite(ctx, which, sx, sy, size, frame); return; }
   const ramp = which === 'diver' ? PALETTE.diver : which === 'hollow' ? PALETTE.hollow : PALETTE.voice;
-  ctx.fillStyle = ramp[1]; ctx.fillRect(sx + 2, sy + 1, TILE - 4, TILE - 2);
-  ctx.fillStyle = ramp[2]; ctx.fillRect(sx + 3, sy + 2, 2, 2);
+  ctx.fillStyle = ramp[1]; ctx.fillRect(sx + 2, sy + 1, size - 4, size - 2);
+}
+
+// The player: sized ENT, offset to stand on its tile.
+function drawEntity(which, sx, sy, frame) {
+  drawEntitySized(which, sx - (ENT - TILE) / 2, sy - (ENT - TILE) - 1, ENT, frame);
 }
 
 // Is (x,y) a wall tile that borders at least one floor tile? Those are the only
@@ -275,14 +284,31 @@ function renderExplore() {
     }
   }
 
+  // Ambient echoes drift through first (behind waypoints/player) — the space is
+  // inhabited. They flicker (frame toggles fast) and fade with distance.
+  const efr = Math.floor(animMs / 140) & 1;
+  for (const e of explore.echoes()) {
+    const dx = e.x * TILE - camX - ENT / 2, dy = e.y * TILE - camY - ENT / 2;
+    ctx.globalAlpha = 0.55;
+    drawEntitySized('echo', dx, dy, ENT - 3, efr);
+    ctx.globalAlpha = 1;
+  }
+
   // Choice waypoints: an unmade choice glows (voice gold, gently pulsing); a made
-  // one dims. The exit brightens only once every choice is done.
+  // one dims. The ENCOUNTER slot hosts a resident echo you approach to speak
+  // with, so it reads as a creature, not a marker. The exit brightens only once
+  // every choice is done.
   const pulse = 0.5 + 0.5 * Math.sin(animMs / 320);
   for (const a of explore.assignments) {
     const s = a.slot;
     const dx = s.x * TILE - camX, dy = s.y * TILE - camY;
-    if (a.done) { ctx.fillStyle = PALETTE.voice[0]; ctx.fillRect(dx + 4, dy + 4, TILE - 8, TILE - 8); }
-    else {
+    if (s.role === 'encounter' && !a.done) {
+      // a hovering resident echo, brighter and steadier than the ambient ones
+      const bob = Math.round(Math.sin(animMs / 300) * 1.5);
+      drawEntitySized('echo', dx - (ENT - TILE) / 2, dy - (ENT - TILE) / 2 + bob, ENT + 1, efr);
+    } else if (a.done) {
+      ctx.fillStyle = PALETTE.voice[0]; ctx.fillRect(dx + 4, dy + 4, TILE - 8, TILE - 8);
+    } else {
       ctx.globalAlpha = 0.4 + 0.5 * pulse;
       ctx.fillStyle = PALETTE.voice[1]; ctx.fillRect(dx + 2, dy + 2, TILE - 4, TILE - 4);
       ctx.globalAlpha = 1;
