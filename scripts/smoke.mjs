@@ -18,6 +18,7 @@ import { validateContent, assertValid } from '../src/sim/validate.js';
 import { createInput } from '../src/app/input.js';
 import { labelFor, hintLine } from '../src/app/device-labels.js';
 import { createTitleScreen } from '../src/app/title.js';
+import { describeModel, strongestReadLine, recentCallback } from '../src/sim/playermodel.js';
 
 // The golden end-state fingerprint. null until first run prints it; then baked.
 const GOLDEN = '3434e401';
@@ -209,6 +210,35 @@ function fnv1a32Local(str) {
   title.handlePresses(['confirm']);
   check('begin carries imported=true and the saga choices', began.imported === true && began.choices.ravagerFate === 'spare');
   check('begin carries the imported player-model lean', began.model.mercy === 0.6);
+}
+
+// --- player-model: confidence-gated, one describeModel, attributed callback --
+{
+  const w = makeWorld('model-test');
+  // Two strong signals — below the confidence floor (3) — must still read '—'.
+  reduce(w, { type: 'RECORD_TRAIT_SIGNAL', axis: 'resolve', weight: 1 });
+  reduce(w, { type: 'RECORD_TRAIT_SIGNAL', axis: 'resolve', weight: 1 });
+  let reads = describeModel(w.playerModel);
+  check('a strong lean below the confidence floor still reads unknown', reads.resolve.word === '—');
+  check("with nothing confident yet, the voice admits it hasn't decided", strongestReadLine(w.playerModel).includes("hasn't decided"));
+
+  // A third signal clears the floor — now it should speak.
+  reduce(w, { type: 'RECORD_TRAIT_SIGNAL', axis: 'resolve', weight: 1 });
+  reads = describeModel(w.playerModel);
+  check('three consistent signals clears the confidence floor', reads.resolve.word === 'bold');
+  check('strongestReadLine now names the confident axis', strongestReadLine(w.playerModel).includes('bold'));
+
+  // A borderline mean (near zero) stays undecided even once confident.
+  const w2 = makeWorld('model-borderline');
+  reduce(w2, { type: 'RECORD_TRAIT_SIGNAL', axis: 'mercy', weight: 0.05 });
+  reduce(w2, { type: 'RECORD_TRAIT_SIGNAL', axis: 'mercy', weight: -0.05 });
+  reduce(w2, { type: 'RECORD_TRAIT_SIGNAL', axis: 'mercy', weight: 0.02 });
+  check('a near-zero mean reads undecided even with enough samples', describeModel(w2.playerModel).mercy.word === '—');
+
+  // Attributed callback quotes the MOST RECENT signal, not just any signal.
+  check('no callback before any signal', recentCallback(makeWorld('fresh').playerModel) === null);
+  reduce(w, { type: 'RECORD_TRAIT_SIGNAL', axis: 'mercy', weight: -1 });
+  check('recentCallback names the last-recorded axis/pole', recentCallback(w.playerModel).includes('ruthless'));
 }
 
 // --- content table validation (real content, when it exists) -----------------
