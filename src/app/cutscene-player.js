@@ -22,6 +22,17 @@ import { markersInWindow } from '../sim/cutscene.js';
 // cap keeps cosmetics and pacing sane after a hitch.
 const MAX_DELTA_MS = 50;
 
+// Typewriter reveal rate, in characters per 1000 units of the scene's OWN
+// elapsed clock — NOT per real-world ms. main.js feeds this player a
+// slowed-down dt (its CUTSCENE_SPEED knob), so the reveal automatically paces
+// with whatever real-time speed the caller chooses, with no second knob to
+// keep in sync. Exported so the caller can size each caption's own on-screen
+// window off the SAME rate its text will actually type at (a caption windowed
+// too tight for its length gets replaced by the next line mid-type — the
+// authored per-beat timing predates the typewriter and was tuned to the old
+// instant-reveal captions, not this rate).
+export const CHARS_PER_SEC = 90;
+
 export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf = null } = {}) {
   let elapsed = 0;
   let lastFiredMs = -1; // below 0 so an atMs:0 marker fires on the first advance
@@ -101,12 +112,6 @@ export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf 
   const CAPTION_FONT = '10px ui-monospace, monospace';
   const LINE_H = 12;
   const MARGIN = 12;
-  // Typewriter reveal rate, in characters per 1000 units of the scene's OWN
-  // elapsed clock — NOT per real-world ms. main.js feeds this player a
-  // slowed-down dt (its CUTSCENE_SPEED knob), so the reveal automatically
-  // paces with whatever real-time speed the caller chooses, with no second
-  // knob to keep in sync.
-  const CHARS_PER_SEC = 90;
 
   // Greedy word-wrap to the canvas's own width. A caption is authored as one
   // sentence-length string (this repo's captions run well past what fits on
@@ -173,6 +178,7 @@ export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf 
     advance, skip, draw, cosmetics,
     isEnded: () => ended,
     elapsedMs: () => elapsed,
+    totalMs: () => scene.totalMs,
     firedCount: () => firedCount,
     sceneId: scene.id,
   };

@@ -14,7 +14,7 @@ import { FLOOR } from './sim/procgen.js';
 import { createInput } from './app/input.js';
 import { createTitleScreen } from './app/title.js';
 import { createChoiceScreen } from './app/choice-screen.js';
-import { createCutscenePlayer } from './app/cutscene-player.js';
+import { createCutscenePlayer, CHARS_PER_SEC } from './app/cutscene-player.js';
 import { createExplore } from './app/explore.js';
 import { makeSpriteSheet } from './app/sprites.js';
 import { createAudio } from './app/audio.js';
@@ -27,7 +27,7 @@ import { BEATS, CHOICE_POINTS, ENDINGS, ECHO_COUNT } from './sim/content.js';
 import { labelFor } from './app/device-labels.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p20';
+const BUILD_ID = 'p21';
 
 // A cutscene shares its skip control with nothing else, but a bare tap can
 // still eat a story beat by accident — require a deliberate ~1.2s HOLD instead
@@ -137,17 +137,31 @@ function deliverCarried() {
   if (n > 0) { dispatch({ type: 'DELIVER_ECHOES', n }); audio.chime(); }
 }
 
-// --- cutscene plumbing (unchanged from P6) ----------------------------------
+// --- cutscene plumbing -------------------------------------------------------
+// A line's own on-screen window: long enough for the typewriter (cutscene-
+// player's CHARS_PER_SEC) to fully reveal it, plus a fixed pause to actually
+// read the finished line. Dividing the authored totalMs evenly by line count
+// (the old approach) was tuned before the typewriter existed — most of these
+// lines run well past 90 chars, so an even split cut them off mid-type the
+// instant the next line's atMs arrived.
+const READ_PAUSE_MS = 500;
+function lineWindowMs(text) {
+  return Math.max(600, Math.round((text.length / CHARS_PER_SEC) * 1000)) + READ_PAUSE_MS;
+}
+
 function makeBeatScene(spineNode) {
   const facts = buildFacts(world);
   const beatId = selectBeat(facts, BEATS, { spineNode, lastPlayed: world.director.lastPlayed });
   const beat = BEATS.find((b) => b.id === beatId) || { lines: ['...'] };
   dispatch({ type: 'BEAT_PLAYED', beatId });
   const timing = STAGE_TIMING[spineNode];
-  const lines = beat.lines;
-  const span = timing.totalMs - 300;
-  const captions = lines.map((text, i) => ({ atMs: 150 + Math.round((span * i) / Math.max(1, lines.length)), text }));
-  return { id: `${spineNode}:${beatId}`, totalMs: timing.totalMs, cmdMarkers: timing.extraMarkers || [],
+  let t = 150;
+  const captions = beat.lines.map((text) => { const atMs = t; t += lineWindowMs(text); return { atMs, text }; });
+  // The scene never runs SHORTER than authored (so the entity animation and
+  // any cmdMarkers keep their tuned pacing), but grows to fit whatever the
+  // dialogue actually needs, plus the letterbox's own fade-out.
+  const totalMs = Math.max(timing.totalMs, t + (timing.letterbox.outMs || 0));
+  return { id: `${spineNode}:${beatId}`, totalMs, cmdMarkers: timing.extraMarkers || [],
     cosmeticTracks: { letterbox: timing.letterbox, captions } };
 }
 
@@ -613,7 +627,7 @@ function render(nowMs) {
   else if (mode === 'cutscene') {
     ctx.fillStyle = PALETTE.void; ctx.fillRect(0, 0, canvas.width, canvas.height);
     if (cutscene) {
-      renderCutsceneEntity(cutsceneNode, cutscene.elapsedMs(), STAGE_TIMING[cutsceneNode] ? STAGE_TIMING[cutsceneNode].totalMs : 2400);
+      renderCutsceneEntity(cutsceneNode, cutscene.elapsedMs(), cutscene.totalMs());
       cutscene.draw(ctx);
       renderHoldToSkip(device);
     }
