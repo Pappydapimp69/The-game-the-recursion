@@ -21,14 +21,28 @@ const N_ECHOES = 4;  // ambient drifting voices that inhabit the space
 export function createExplore(map, choicePoints, { onReachChoice, onReachExit }) {
   const { w, h, tiles } = map.grid;
 
-  // Assign each choice point to a distinct interior slot (never entry/exit), in
-  // a fixed order so the layout is deterministic for a given map. With the
-  // default spec there are more interior slots than choice points, so each gets
-  // its own; the modulo is just a safety net if that ever inverts.
+  // Give every choice point its OWN distinct position: the interior slots first
+  // (never entry/exit), then extra floor tiles for any overflow, so no two
+  // choices ever share a tile (which would soft-lock the second — a trigger only
+  // fires on stepping ONTO a tile). Positions are seeded so a map lays out the
+  // same choices every time. All floor is flood-fill-reachable by construction
+  // (procgen validator), so no choice can be walled off.
   const interior = map.slots.filter((s) => s.role !== 'entry' && s.role !== 'exit');
+  const positions = interior.slice();
+  if (choicePoints.length > positions.length) {
+    const used = new Set(positions.map((s) => s.x + ',' + s.y));
+    used.add(map.entry.x + ',' + map.entry.y);
+    used.add(map.exit.x + ',' + map.exit.y);
+    const spare = [];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (tiles[y * w + x] === FLOOR && !used.has(x + ',' + y)) spare.push({ role: 'extra', x, y });
+    }
+    makeRng(`${map.seed}:${map.attempt}:cpslots`).shuffle(spare);
+    while (positions.length < choicePoints.length && spare.length) positions.push(spare.pop());
+  }
   const assignments = choicePoints.map((cp, i) => ({
     cp,
-    slot: interior[i % interior.length],
+    slot: positions[i % positions.length],
     done: false,
   }));
 

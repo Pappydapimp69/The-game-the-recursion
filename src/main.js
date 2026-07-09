@@ -26,7 +26,7 @@ import { axisRead } from './sim/playermodel.js';
 import { BEATS, CHOICE_POINTS, ENDINGS } from './sim/content.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p12';
+const BUILD_ID = 'p13';
 
 const STAGE_TIMING = {
   intro: { totalMs: 2400, letterbox: { inMs: 400, outMs: 400, height: 0.16 },

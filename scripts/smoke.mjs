@@ -450,7 +450,7 @@ function runSpine(seed, choiceIdxs, endingIdx) {
   reduce(w, { type: 'ADVANCE_SPINE' }); // intro(0) -> learning(1)
   for (let i = 0; i < CHOICE_POINTS.length; i++) {
     const cp = CHOICE_POINTS[i];
-    const opt = cp.options[choiceIdxs[i]];
+    const opt = cp.options[choiceIdxs[i] ?? 0]; // short arrays default to option 0
     reduce(w, { type: 'CHOOSE_OPTION', pointId: cp.id, axis: opt.axis, weight: opt.weight });
   }
   reduce(w, { type: 'ADVANCE_SPINE' }); // learning(1) -> reveal(2): gated on spine.totalChoicePoints
@@ -502,8 +502,27 @@ function runSpine(seed, choiceIdxs, endingIdx) {
 
   // Different choices/ending produce a different exported code (sanity: the
   // model/choice actually reach the export, it isn't a constant string).
-  const w3 = runSpine('spine-a', [1, 1, 1], 1);
+  const w3 = runSpine('spine-a', [1, 1, 1, 1], 2);
   check('different choices export a different saga code', exportSaga(w3) !== code1);
+
+  // Content depth: four axes exercised, three endings, and the reveal beat
+  // actually reflects the DOMINANT trait (all-merciful choices -> a mercy
+  // reveal), proving the retelling varies by who you became, not at random.
+  check('there are six learning choice points', CHOICE_POINTS.length === 6);
+  check('there are three endings', ENDINGS.length === 3);
+  // Both mercy choices merciful (net +2), one resolve choice cancelled to 0 —
+  // mercy is the sole net-2 axis, so it must be the named dominant.
+  const merc = runSpine('dom-mercy', [0, 0, 0, 0, 0, 1], 0);
+  const mercFacts = buildFacts(merc);
+  check('a consistently merciful player has mercy as the dominant trait', mercFacts.dominant === 'mercy' && mercFacts.dominantWord === 'merciful');
+  check('a merciful player draws the merciful reveal beat', selectBeat(mercFacts, BEATS, { spineNode: 'reveal' }) === 'reveal-merciful');
+  // A player whose repeated axes cancel (mercy +1 then -1, resolve +1 then -1)
+  // reaches no net-2 lean on any axis, so there's no named dominant and the
+  // reveal is honestly unsure, not a random pick.
+  const wishy = runSpine('wishy', [0, 0, 0, 0, 1, 1], 0); // mercy(i2)+ mercy(i4)-, resolve(i0)+ resolve(i5)-
+  const wishyFacts = buildFacts(wishy);
+  check('a self-cancelling player has no named dominant', wishyFacts.dominant === '');
+  check('and draws the honestly-unsure reveal', selectBeat(wishyFacts, BEATS, { spineNode: 'reveal' }) === 'reveal-unsure');
 
   // The learning-stage map is generated from world.seed via the SAME procgen
   // path main.js uses, and it's the pure/reproducible function P3 verified.

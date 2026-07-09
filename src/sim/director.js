@@ -28,6 +28,23 @@ export function buildFacts(world) {
   for (const [k, v] of Object.entries(world.facets)) facts[`facets.${k}`] = v;
   facts.imported = !!world.settings.imported;
   facts['arc.choice'] = world.arc.choice || '';
+
+  // The player's DOMINANT trait — the axis they leaned into hardest across the
+  // whole learning, by ACCUMULATED weight (|sum|), not confidence. The reveal is
+  // a summation (the learning is over), so it commits on modest evidence where
+  // an "I know you" mid-game assertion would not. A net lean of at least 2 is
+  // required to name one, so a single ±1 choice, or a wishy-washy axis that
+  // cancels itself out, leaves dominant '' and the reveal stays honestly unsure.
+  // Ties (equal |sum|) break by AXES declaration order — deterministic.
+  let dom = '', domWord = '', best = 1;
+  for (const axis of Object.keys(AXES)) {
+    const ax = world.playerModel.axes[axis];
+    const s = Math.abs(ax.sum);
+    if (ax.n < 1 || s < 2 || s <= best) continue;
+    best = s; dom = axis; domWord = ax.sum > 0 ? AXES[axis].pos : AXES[axis].neg;
+  }
+  facts.dominant = dom;
+  facts.dominantWord = domWord;
   return facts;
 }
 
