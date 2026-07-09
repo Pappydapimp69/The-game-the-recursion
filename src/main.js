@@ -1,31 +1,30 @@
-// The front door, now running the whole fixed spine (PROPOSAL §4): title ->
-// intro -> learning (choices feed the player-model) -> reveal -> hollow (the
-// ending choice) -> finale -> the saga.v5 code. One unified input layer polled
-// once per frame; `mode` is the ONE source of truth for which screen is live.
-// Exposes window.__game so headless e2e can drive the same reducer/UI the
-// player does.
+// The front door, running the whole fixed spine (PROPOSAL §4): title -> intro
+// -> learning (WALKED as a real space now; choices feed the player-model) ->
+// reveal -> hollow (the ending choice) -> finale -> the saga.v5 code. One
+// unified input layer polled once per frame; `mode` is the ONE source of truth
+// for which screen is live. Exposes window.__game so headless e2e can drive the
+// same reducer/UI the player does.
 
 import { makeWorld, fingerprintOf, AXES } from './sim/world.js';
 import { reduce, leanLabel } from './sim/reduce.js';
 import { fingerprint } from './sim/fingerprint.js';
 import { demoScript } from './sim/demo.js';
 import { seedState, subStream } from './sim/rng.js';
+import { FLOOR } from './sim/procgen.js';
 import { createInput } from './app/input.js';
 import { createTitleScreen } from './app/title.js';
 import { createChoiceScreen } from './app/choice-screen.js';
 import { createCutscenePlayer } from './app/cutscene-player.js';
+import { createExplore } from './app/explore.js';
+import { PALETTE, shade } from './app/palette.js';
 import { exportSaga } from './sim/saga.js';
 import { gen, DEFAULT_SPEC, GEN_VERSION } from './sim/procgen.js';
 import { buildFacts, selectBeat } from './sim/director.js';
 import { BEATS, CHOICE_POINTS, ENDINGS } from './sim/content.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p6';
+const BUILD_ID = 'p8';
 
-// Per-spine-node cutscene timing + a small ambient facet restore per node — the
-// world gaining definition as the retelling proceeds (world-facets-as-reward).
-// Beat TEXT is chosen live by the director (§5.3); this table only holds the
-// cosmetic/mechanical shape shared by every variant of a given node.
 const STAGE_TIMING = {
   intro: { totalMs: 2400, letterbox: { inMs: 400, outMs: 400, height: 0.16 },
     extraMarkers: [{ atMs: 900, cmd: { type: 'RESTORE_FACET', facet: 'light' } }] },
@@ -41,16 +40,20 @@ ctx.imageSmoothingEnabled = false;
 
 const input = createInput(window);
 
-// mode is the ONE source of truth for which screen is live — every dismissal
-// path sets it explicitly so nothing leaks between modes (test#E6).
-let mode = 'title'; // 'title' | 'cutscene' | 'choice' | 'ended'
+// mode is the ONE source of truth for which screen is live (test#E6).
+let mode = 'title'; // 'title' | 'cutscene' | 'explore' | 'choice' | 'ended'
 let world = null;
-let cutscene = null;      // the active presentation-layer cutscene player, or null
-let cutsceneOnEnd = null; // what to do next when the current cutscene ends
-let choiceScreen = null;  // the active choice-screen instance, or null
-let learningMap = null;   // the procgen map generated for 'the learning' backdrop
-let sagaCode = '';        // set once the spine reaches 'done'
-let lastFrameMs = 0;      // for the cutscene's own capped-delta clock
+let cutscene = null;
+let cutsceneOnEnd = null;
+let choiceScreen = null;
+let choiceOnClose = null; // where a resolved choice returns to (explore, or the spine)
+let explore = null;       // the active exploration space, or null
+let learningMap = null;
+let sagaCode = '';
+let sprites = null;       // the procedural sprite sheet, set once a world exists (P9)
+let lastFrameMs = 0;      // cutscene's own capped-delta clock
+let prevMs = 0;           // general per-frame delta for exploration
+let animMs = 0;           // free-running clock for idle animation
 
 let title = createTitleScreen({
   onBegin: (opts) => { world = newWorld(opts); beginIntro(); },
@@ -58,32 +61,20 @@ let title = createTitleScreen({
 });
 
 function dispatch(cmd) { return world ? reduce(world, cmd) : []; }
-
-// The one place a new world is constructed for real play — always with the
-// content-derived spine threshold, so ADVANCE_SPINE's gate is never missing it.
 function newWorld(opts) { return makeWorld('recursion', { ...opts, totalChoicePoints: CHOICE_POINTS.length }); }
 
-// Build a cutscene for a spine node from the LIVE player-model: the director
-// picks the variant, BEAT_PLAYED records it, and the beat's lines become the
-// scene's caption track, evenly spaced. Same dispatch path as gameplay, so a
-// cutscene here is exactly as replayable as everything else in the sim.
+// --- cutscene plumbing (unchanged from P6) ----------------------------------
 function makeBeatScene(spineNode) {
   const facts = buildFacts(world);
   const beatId = selectBeat(facts, BEATS, { spineNode, lastPlayed: world.director.lastPlayed });
   const beat = BEATS.find((b) => b.id === beatId) || { lines: ['...'] };
   dispatch({ type: 'BEAT_PLAYED', beatId });
-
   const timing = STAGE_TIMING[spineNode];
   const lines = beat.lines;
   const span = timing.totalMs - 300;
   const captions = lines.map((text, i) => ({ atMs: 150 + Math.round((span * i) / Math.max(1, lines.length)), text }));
-
-  return {
-    id: `${spineNode}:${beatId}`,
-    totalMs: timing.totalMs,
-    cmdMarkers: timing.extraMarkers || [],
-    cosmeticTracks: { letterbox: timing.letterbox, captions },
-  };
+  return { id: `${spineNode}:${beatId}`, totalMs: timing.totalMs, cmdMarkers: timing.extraMarkers || [],
+    cosmeticTracks: { letterbox: timing.letterbox, captions } };
 }
 
 function startCutscene(scene, onEnd) {
@@ -93,9 +84,6 @@ function startCutscene(scene, onEnd) {
   cutsceneOnEnd = onEnd;
   mode = 'cutscene';
 }
-
-// The single exit: whichever way the scene ended (finished or skipped), run
-// whatever the caller wanted next — never re-enter 'play', that mode is gone.
 function endCutscene() {
   cutscene = null;
   const next = cutsceneOnEnd; cutsceneOnEnd = null;
@@ -105,170 +93,260 @@ function endCutscene() {
 // --- the fixed spine, in order (PROPOSAL §4) --------------------------------
 function beginIntro() {
   startCutscene(makeBeatScene('intro'), () => {
-    dispatch({ type: 'ADVANCE_SPINE' }); // intro(0) -> learning(1): always allowed
+    dispatch({ type: 'ADVANCE_SPINE' }); // intro(0) -> learning(1)
     beginLearning();
   });
 }
 
+// "The learning" is now a walked space. Generate this run's map (pure function
+// of the seed), drop the player at the entry, and let them find the choices.
 function beginLearning() {
-  // Generate (never store) this run's map from its seed — proof procgen is
-  // actually wired into the game the player sees, not just unit-tested.
   learningMap = gen(world.seed, GEN_VERSION, DEFAULT_SPEC);
-  mode = 'choice';
-  nextChoicePoint();
+  explore = createExplore(learningMap, CHOICE_POINTS, {
+    onReachChoice: (assignment) => openChoice(assignment.cp, () => {
+      explore.resolveChoice(assignment);
+      mode = 'explore';
+    }, (opt) => dispatch({ type: 'CHOOSE_OPTION', pointId: assignment.cp.id, axis: opt.axis, weight: opt.weight })),
+    onReachExit: () => {
+      dispatch({ type: 'ADVANCE_SPINE' }); // learning(1) -> reveal(2)
+      explore = null;
+      beginReveal();
+    },
+  });
+  mode = 'explore';
 }
 
-function nextChoicePoint() {
-  const idx = world.spine.learningIdx;
-  if (idx >= CHOICE_POINTS.length) {
-    dispatch({ type: 'ADVANCE_SPINE' }); // learning(1) -> reveal(2): gated on world.spine.totalChoicePoints
-    beginReveal();
-    return;
-  }
-  const cp = CHOICE_POINTS[idx];
+// Open a choice screen; onCommit runs the authoritative dispatch, onClose
+// returns control to wherever we came from.
+function openChoice(cp, onClose, onCommit) {
+  choiceOnClose = onClose;
   choiceScreen = createChoiceScreen({
     prompt: cp.prompt,
     options: cp.options,
     onChoose: (_i, opt) => {
-      dispatch({ type: 'CHOOSE_OPTION', pointId: cp.id, axis: opt.axis, weight: opt.weight });
+      if (onCommit) onCommit(opt);
       choiceScreen = null;
-      nextChoicePoint();
+      const close = choiceOnClose; choiceOnClose = null;
+      if (close) close();
     },
   });
+  mode = 'choice';
 }
 
 function beginReveal() {
   startCutscene(makeBeatScene('reveal'), () => {
-    dispatch({ type: 'ADVANCE_SPINE' }); // reveal(2) -> hollow(3): always allowed
+    dispatch({ type: 'ADVANCE_SPINE' }); // reveal(2) -> hollow(3)
     beginHollow();
   });
 }
 
 function beginHollow() {
-  mode = 'choice';
-  choiceScreen = createChoiceScreen({
-    prompt: 'The hollow waits. What do you do with what it became?',
-    options: ENDINGS,
-    onChoose: (_i, ending) => {
-      dispatch({ type: 'END', choice: ending.id });
-      choiceScreen = null;
-      dispatch({ type: 'ADVANCE_SPINE' }); // hollow(3) -> finale(4): gated on flags.ended
-      beginFinale();
-    },
-  });
+  openChoice(
+    { id: 'hollow', prompt: 'The hollow waits, wearing your shape. What do you do with the voice it stole?', options: ENDINGS },
+    () => { dispatch({ type: 'ADVANCE_SPINE' }); beginFinale(); }, // hollow(3) -> finale(4)
+    (ending) => dispatch({ type: 'END', choice: ending.id }),
+  );
 }
 
 function beginFinale() {
   startCutscene(makeBeatScene('finale'), () => {
-    dispatch({ type: 'ADVANCE_SPINE' }); // finale(4) -> done(5): always allowed
+    dispatch({ type: 'ADVANCE_SPINE' }); // finale(4) -> done(5)
     beginEnded();
   });
 }
 
 function beginEnded() {
-  learningMap = null;
+  learningMap = null; explore = null;
   sagaCode = exportSaga(world);
   mode = 'ended';
 }
 
 // --- input / frame loop ------------------------------------------------------
 function tickFrame(nowMs) {
-  const { device } = input.sample(nowMs);
+  const { move, device } = input.sample(nowMs);
   const presses = input.takePresses();
+  const dt = prevMs ? Math.min(nowMs - prevMs, 50) : 16;
+  prevMs = nowMs;
+  animMs = nowMs;
+
   if (mode === 'title') {
     title.handlePresses(presses);
   } else if (mode === 'cutscene') {
-    // Cinematic mode routes input to ONE control only — skip — and advances the
-    // player on its own capped-delta clock. Either end path lands in endCutscene.
     if (presses.includes('skip')) cutscene.skip();
-    else { const dt = lastFrameMs ? nowMs - lastFrameMs : 0; cutscene.advance(dt); }
+    else { const cdt = lastFrameMs ? nowMs - lastFrameMs : 0; cutscene.advance(cdt); }
     lastFrameMs = nowMs;
     if (cutscene.isEnded()) endCutscene();
+  } else if (mode === 'explore') {
+    if (explore) explore.update(move, dt);
   } else if (mode === 'choice') {
     if (choiceScreen) choiceScreen.handlePresses(presses);
   }
   return device;
 }
 
-// --- rendering ----------------------------------------------------------------
+// --- rendering ---------------------------------------------------------------
+const TILE = 12;
+
 function renderTitle(device) {
   const W = canvas.width, H = canvas.height;
-  ctx.fillStyle = '#05060a'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = PALETTE.void; ctx.fillRect(0, 0, W, H);
   ctx.font = '12px ui-monospace, monospace';
-  ctx.fillStyle = '#cdd3e0';
+  ctx.fillStyle = PALETTE.ink[0];
   ctx.fillText('THE RECURSION', 16, 24);
   const v = title.view(device);
   let ty = 60;
   for (const row of v.rows) {
-    ctx.fillStyle = row.selected ? '#e6c15a' : '#5a6a8a';
-    const marker = row.selected ? '> ' : '  ';
+    ctx.fillStyle = row.selected ? PALETTE.voice[1] : PALETTE.ink[2];
     ctx.font = '10px ui-monospace, monospace';
-    ctx.fillText(`${marker}${row.label}${row.value ? ': ' + row.value : ''}`, 16, ty);
+    ctx.fillText(`${row.selected ? '> ' : '  '}${row.label}${row.value ? ': ' + row.value : ''}`, 16, ty);
     ty += 16;
   }
-  ctx.fillStyle = '#45506a';
+  ctx.fillStyle = PALETTE.ink[3];
   ctx.font = '8px ui-monospace, monospace';
   ctx.fillText(v.hint, 16, H - 12);
 }
 
-function renderModelBackdrop() {
+function renderModelHud() {
   const W = canvas.width, H = canvas.height;
-  ctx.fillStyle = '#5a6a8a'; ctx.font = '8px ui-monospace, monospace';
+  ctx.fillStyle = PALETTE.ink[2]; ctx.font = '8px ui-monospace, monospace';
   let ty = H - 54;
   ctx.fillText(`${world.settings.archetype} / ${world.settings.difficulty}`, 4, ty);
   for (const axis of Object.keys(AXES)) { ty += 9; ctx.fillText(`${axis}: ${leanLabel(axis, world.playerModel.axes[axis])}`, 4, ty); }
 }
 
-function renderMapBackdrop() {
-  if (!learningMap) return;
+// Draw one map tile at screen (sx,sy). Uses the sprite sheet when present,
+// else a palette rect so P8 stands alone before sprites (P9) land.
+function drawTile(kind, tx, ty, sx, sy) {
+  if (sprites) { sprites.drawTile(ctx, kind, (tx * 7 + ty * 13) & 3, sx, sy, TILE); return; }
+  ctx.fillStyle = kind === 'floor' ? PALETTE.stone[1] : PALETTE.stone[0];
+  ctx.fillRect(sx, sy, TILE, TILE);
+  if (kind === 'floor') { ctx.fillStyle = PALETTE.stone[2]; ctx.fillRect(sx, sy, 1, 1); }
+}
+
+function drawEntity(which, sx, sy, frame) {
+  if (sprites) { sprites.drawSprite(ctx, which, sx, sy, TILE, frame); return; }
+  const ramp = which === 'diver' ? PALETTE.diver : which === 'hollow' ? PALETTE.hollow : PALETTE.voice;
+  ctx.fillStyle = ramp[1]; ctx.fillRect(sx + 2, sy + 1, TILE - 4, TILE - 2);
+  ctx.fillStyle = ramp[2]; ctx.fillRect(sx + 3, sy + 2, 2, 2);
+}
+
+function renderExplore() {
+  const W = canvas.width, H = canvas.height;
   const { w, h, tiles } = learningMap.grid;
-  const s = 3;
-  ctx.fillStyle = '#141a2b';
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (tiles[y * w + x]) ctx.fillRect(x * s, y * s, s, s);
+  const p = explore.player();
+  ctx.fillStyle = PALETTE.void; ctx.fillRect(0, 0, W, H);
+
+  // Camera centers the player, clamped so we don't scroll far past the map edge.
+  const camX = Math.round(p.x * TILE + TILE / 2 - W / 2);
+  const camY = Math.round(p.y * TILE + TILE / 2 - H / 2);
+
+  const x0 = Math.max(0, Math.floor(camX / TILE)), x1 = Math.min(w - 1, Math.ceil((camX + W) / TILE));
+  const y0 = Math.max(0, Math.floor(camY / TILE)), y1 = Math.min(h - 1, Math.ceil((camY + H) / TILE));
+  for (let ty = y0; ty <= y1; ty++) {
+    for (let tx = x0; tx <= x1; tx++) {
+      if (tiles[ty * w + tx] !== FLOOR) continue;
+      drawTile('floor', tx, ty, tx * TILE - camX, ty * TILE - camY);
+    }
+  }
+
+  // Choice waypoints: an unmade choice glows (voice gold, gently pulsing); a made
+  // one dims. The exit brightens only once every choice is done.
+  const pulse = 0.5 + 0.5 * Math.sin(animMs / 320);
+  for (const a of explore.assignments) {
+    const s = a.slot;
+    const dx = s.x * TILE - camX, dy = s.y * TILE - camY;
+    if (a.done) { ctx.fillStyle = PALETTE.voice[0]; ctx.fillRect(dx + 4, dy + 4, TILE - 8, TILE - 8); }
+    else {
+      ctx.globalAlpha = 0.4 + 0.5 * pulse;
+      ctx.fillStyle = PALETTE.voice[1]; ctx.fillRect(dx + 2, dy + 2, TILE - 4, TILE - 4);
+      ctx.globalAlpha = 1;
+    }
+  }
+  const ex = learningMap.exit;
+  { const dx = ex.x * TILE - camX, dy = ex.y * TILE - camY;
+    ctx.fillStyle = explore.atExitReady() ? PALETTE.diver[2] : PALETTE.stone[2];
+    ctx.globalAlpha = explore.atExitReady() ? (0.5 + 0.5 * pulse) : 0.5;
+    ctx.fillRect(dx + 3, dy + 3, TILE - 6, TILE - 6); ctx.globalAlpha = 1; }
+
+  // The player.
+  const frame = Math.floor(animMs / 380) & 1;
+  drawEntity('diver', p.x * TILE - camX, p.y * TILE - camY, frame);
+
+  // HUD: what remains, and the live model.
+  ctx.fillStyle = PALETTE.ink[1]; ctx.font = '9px ui-monospace, monospace';
+  const rem = explore.remaining();
+  ctx.fillText(rem > 0 ? `voices to hear: ${rem}` : 'the way out is open', 8, 16);
+  renderModelHud();
 }
 
 function renderChoice(device) {
   const W = canvas.width, H = canvas.height;
-  ctx.fillStyle = '#05060a'; ctx.fillRect(0, 0, W, H);
-  renderMapBackdrop();
-  ctx.fillStyle = 'rgba(5,6,10,0.72)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = PALETTE.void; ctx.fillRect(0, 0, W, H);
+  if (learningMap) { // keep the space faintly behind the choice, if we're in one
+    ctx.globalAlpha = 0.25; renderExploreBackdropOnly(); ctx.globalAlpha = 1;
+  }
+  ctx.fillStyle = 'rgba(4,5,10,0.7)'; ctx.fillRect(0, 0, W, H);
   const v = choiceScreen.view(device);
-  ctx.fillStyle = '#cdd3e0'; ctx.font = '10px ui-monospace, monospace';
-  ctx.fillText(v.prompt, 12, 40);
-  let ty = 72;
+  ctx.fillStyle = PALETTE.ink[0]; ctx.font = '10px ui-monospace, monospace';
+  wrapText(v.prompt, 12, 40, W - 24, 13);
+  let ty = 100;
   for (const o of v.options) {
-    ctx.fillStyle = o.selected ? '#e6c15a' : '#8fa0c8';
+    ctx.fillStyle = o.selected ? PALETTE.voice[1] : PALETTE.ink[1];
     ctx.fillText((o.selected ? '> ' : '  ') + o.label, 16, ty);
     ty += 18;
   }
-  ctx.fillStyle = '#45506a'; ctx.font = '8px ui-monospace, monospace';
+  ctx.fillStyle = PALETTE.ink[3]; ctx.font = '8px ui-monospace, monospace';
   ctx.fillText(v.hint, 16, H - 12);
-  renderModelBackdrop();
+  renderModelHud();
+}
+
+// Just the tiles+player, no HUD — used dimmed behind a choice overlay.
+function renderExploreBackdropOnly() {
+  if (!explore) return;
+  const W = canvas.width, H = canvas.height;
+  const { w, h, tiles } = learningMap.grid;
+  const p = explore.player();
+  const camX = Math.round(p.x * TILE + TILE / 2 - W / 2);
+  const camY = Math.round(p.y * TILE + TILE / 2 - H / 2);
+  const x0 = Math.max(0, Math.floor(camX / TILE)), x1 = Math.min(w - 1, Math.ceil((camX + W) / TILE));
+  const y0 = Math.max(0, Math.floor(camY / TILE)), y1 = Math.min(h - 1, Math.ceil((camY + H) / TILE));
+  for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
+    if (tiles[ty * w + tx] === FLOOR) drawTile('floor', tx, ty, tx * TILE - camX, ty * TILE - camY);
+  }
 }
 
 function renderEnded() {
   const W = canvas.width, H = canvas.height;
-  ctx.fillStyle = '#05060a'; ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = '#cdd3e0'; ctx.font = '11px ui-monospace, monospace';
+  ctx.fillStyle = PALETTE.void; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = PALETTE.ink[0]; ctx.font = '11px ui-monospace, monospace';
   ctx.fillText(`It ends: ${world.arc.choice}`, 12, 20);
   ctx.font = '8px ui-monospace, monospace';
-  ctx.fillStyle = '#8fb6ff';
-  const CHARS_PER_LINE = 46;
+  ctx.fillStyle = PALETTE.diver[1];
+  const CPL = 46;
   let ty = 40;
-  for (let i = 0; i < sagaCode.length && ty < H - 6; i += CHARS_PER_LINE, ty += 10) {
-    ctx.fillText(sagaCode.slice(i, i + CHARS_PER_LINE), 12, ty);
+  for (let i = 0; i < sagaCode.length && ty < H - 6; i += CPL, ty += 10) ctx.fillText(sagaCode.slice(i, i + CPL), 12, ty);
+}
+
+// Small word-wrap helper for prompts that outgrew one line.
+function wrapText(text, x, y, maxW, lineH) {
+  const words = String(text).split(' ');
+  let line = '', ty = y;
+  for (const word of words) {
+    const test = line ? line + ' ' + word : word;
+    if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, x, ty); line = word; ty += lineH; }
+    else line = test;
   }
+  if (line) ctx.fillText(line, x, ty);
 }
 
 const buildEl = document.getElementById('build');
 function render(nowMs) {
   const device = tickFrame(nowMs);
   if (mode === 'title') renderTitle(device);
-  else if (mode === 'cutscene') { ctx.fillStyle = '#05060a'; ctx.fillRect(0, 0, canvas.width, canvas.height); if (world) renderModelBackdrop(); if (cutscene) cutscene.draw(ctx); }
+  else if (mode === 'cutscene') { ctx.fillStyle = PALETTE.void; ctx.fillRect(0, 0, canvas.width, canvas.height); if (world) renderModelHud(); if (cutscene) cutscene.draw(ctx); }
+  else if (mode === 'explore') renderExplore();
   else if (mode === 'choice') renderChoice(device);
   else if (mode === 'ended') renderEnded();
-  // Driven from the same frame, so the visible mode/build line can never lag
-  // behind actual state (the-game-prologue#E8 — observable, not guessed).
   buildEl.textContent = `the recursion · build ${BUILD_ID} · mode ${mode}` + (world ? ` · fp ${fingerprint(fingerprintOf(world))}` : '');
   requestAnimationFrame(render);
 }
@@ -284,10 +362,13 @@ window.__game = {
   fingerprint: () => (world ? fingerprint(fingerprintOf(world)) : null),
   forceBegin: (opts) => { world = newWorld(opts); beginIntro(); },
   runScript: (seed = 'recursion-smoke') => { world = makeWorld(seed); for (const c of demoScript()) reduce(world, c); return fingerprint(fingerprintOf(world)); },
-  // Cutscene drive/read for headless e2e (skip fires all remaining markers).
   cutscene: () => (cutscene ? { id: cutscene.sceneId, elapsedMs: cutscene.elapsedMs(), firedCount: cutscene.firedCount(), ended: cutscene.isEnded(), cosmetics: cutscene.cosmetics() } : null),
   skipCutscene: () => { if (cutscene) cutscene.skip(); },
   cutsceneActiveId: () => (world ? world.cutscene.activeId : null),
+  // Exploration hooks for e2e: read the player tile, force-walk to a slot.
+  explore: () => (explore ? { player: explore.player(), remaining: explore.remaining(), atExitReady: explore.atExitReady(),
+    assignments: explore.assignments.map((a) => ({ pointId: a.cp.id, slot: a.slot, done: a.done })), exit: learningMap.exit } : null),
+  exploreStep: (dx, dy, dt = 120) => { if (explore) explore.update([Math.sign(dx), Math.sign(dy)], dt); },
   sagaCode: () => sagaCode,
   learningMap: () => learningMap,
   BUILD_ID,
