@@ -62,6 +62,16 @@ export function reduce(state, cmd) {
       break;
     }
 
+    // Cinematic mode as ONE authoritative flag with ONE exit path (test#E6:
+    // reused modal state leaks). active:true records the scene id; active:false
+    // clears it — every way a cutscene ends (watch-to-completion OR skip) funnels
+    // through this same clear, so control can never be left half in cinematic mode.
+    case 'MARK_CUTSCENE': {
+      state.cutscene.activeId = cmd.active ? String(cmd.id || '') : null;
+      events.push({ t: 'cutscene', activeId: state.cutscene.activeId });
+      break;
+    }
+
     case 'RESTORE_FACET': {
       if (cmd.facet in state.facets) {
         state.facets[cmd.facet] = 1;

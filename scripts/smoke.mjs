@@ -22,6 +22,9 @@ import { describeModel, strongestReadLine, recentCallback } from '../src/sim/pla
 import { gen, DEFAULT_SPEC, requiredTypes } from '../src/sim/procgen.js';
 import { validateMap } from '../src/sim/procgen-validate.js';
 import { buildFacts, eligible, selectBeat } from '../src/sim/director.js';
+import { firedMarkersUpTo, markersInWindow } from '../src/sim/cutscene.js';
+import { createCutscenePlayer } from '../src/app/cutscene-player.js';
+import { subStream } from '../src/sim/rng.js';
 
 // The golden end-state fingerprint. null until first run prints it; then baked.
 const GOLDEN = '3434e401';
@@ -352,6 +355,89 @@ function fnv1a32Local(str) {
   // BEAT_PLAYED records into world.director.lastPlayed for the next selection.
   reduce(w, { type: 'BEAT_PLAYED', beatId: 'specific-2' });
   check('BEAT_PLAYED records the tick a beat was shown', w.director.lastPlayed['specific-2'] === w.tick);
+}
+
+// --- cutscene: watch-vs-skip hash equality + seek-sweep + one-flag mode -------
+{
+  // A synthetic scene: 3 markers that MUTATE authoritative state (model, facet),
+  // deliberately authored OUT of atMs order to prove firing is ordered by atMs.
+  const scene = {
+    id: 'test',
+    totalMs: 1000,
+    cmdMarkers: [
+      { atMs: 800, cmd: { type: 'RECORD_TRAIT_SIGNAL', axis: 'mercy', weight: 1 } },
+      { atMs: 100, cmd: { type: 'RECORD_TRAIT_SIGNAL', axis: 'resolve', weight: 1 } },
+      { atMs: 500, cmd: { type: 'RESTORE_FACET', facet: 'light' } },
+    ],
+    cosmeticTracks: {},
+  };
+
+  // WATCH: advance a player frame-by-frame (7ms/frame — irregular vs the sweep
+  // step, so nothing lines up on marker boundaries) through the real reducer.
+  const wWatch = makeWorld('cutscene');
+  const pWatch = createCutscenePlayer(scene, { dispatch: (c) => reduce(wWatch, c) });
+  let guard = 0;
+  while (!pWatch.isEnded() && guard++ < 10000) pWatch.advance(7);
+  check('watched cutscene reaches its end', pWatch.isEnded());
+
+  // SKIP: a fresh IDENTICAL world, skipped immediately (all remaining markers
+  // fired in order, cosmetics dropped).
+  const wSkip = makeWorld('cutscene');
+  const pSkip = createCutscenePlayer(scene, { dispatch: (c) => reduce(wSkip, c) });
+  pSkip.skip();
+
+  check('watch and skip produce BYTE-IDENTICAL authoritative state',
+    fingerprint(fingerprintOf(wWatch)) === fingerprint(fingerprintOf(wSkip)));
+  check('all 3 markers fired on both the watched and skipped paths',
+    pWatch.firedCount() === 3 && pSkip.firedCount() === 3);
+
+  // SEEK-SWEEP (memory-mandated: verify a time-based renderer with a full sweep,
+  // not sampled frames). Step ms 0..totalMs in fine contiguous windows and assert
+  // every marker fires EXACTLY once total — none twice, none skipped.
+  const fireCount = new Map(scene.cmdMarkers.map((m) => [m.atMs, 0]));
+  let prev = -1;
+  for (let cur = 0; cur <= scene.totalMs; cur += 10) {
+    for (const m of markersInWindow(scene, prev, cur)) fireCount.set(m.atMs, fireCount.get(m.atMs) + 1);
+    prev = cur;
+  }
+  check('seek-sweep: every marker fires exactly once (none twice, none skipped)',
+    fireCount.size === 3 && [...fireCount.values()].every((n) => n === 1));
+
+  // firedMarkersUpTo is atMs-ordered regardless of authoring order.
+  check('firedMarkersUpTo returns markers in atMs order, not authoring order',
+    firedMarkersUpTo(scene, 600).map((m) => m.atMs).join(',') === '100,500');
+  check('no marker fires before its atMs', firedMarkersUpTo(scene, 0).length === 0);
+}
+
+// --- cutscene mode is ONE flag with ONE exit path (mirrors title.js modal) ----
+{
+  const w = makeWorld('mode-test');
+  const before = JSON.stringify(w.cutscene);
+  reduce(w, { type: 'MARK_CUTSCENE', active: true, id: 'intro' });
+  check('entering cutscene mode sets the single activeId flag', w.cutscene.activeId === 'intro');
+  reduce(w, { type: 'MARK_CUTSCENE', active: false });
+  check('exiting cutscene mode clears activeId (one restore-all exit)', w.cutscene.activeId === null);
+  check('enter->exit leaves cutscene state exactly as it began (no stray flags)',
+    JSON.stringify(w.cutscene) === before);
+}
+
+// --- cutscene cosmetic RNG stays OUT of the authoritative stream --------------
+{
+  const w = makeWorld('rng-test');
+  const rngBefore = w.rng.slice();
+  // The cosmetic RNG is a sub-stream keyed (saveSeed, sceneId); rolling it (and
+  // the player's particle seeding) must never perturb world.rng.
+  const cosmetic = subStream(w.rng, 'cutscene:intro');
+  createCutscenePlayer({ id: 'intro', totalMs: 100, cmdMarkers: [], cosmeticTracks: {} },
+    { dispatch: (c) => reduce(w, c), rng: cosmetic });
+  for (let i = 0; i < 50; i++) cosmetic.u32();
+  check('cosmetic cutscene RNG never perturbs the authoritative world.rng',
+    w.rng.join(',') === rngBefore.join(','));
+  // And entering/exiting cinematic mode itself advances no authoritative roll.
+  reduce(w, { type: 'MARK_CUTSCENE', active: true, id: 'intro' });
+  reduce(w, { type: 'MARK_CUTSCENE', active: false });
+  check('MARK_CUTSCENE does not advance the authoritative rng stream',
+    w.rng.join(',') === rngBefore.join(','));
 }
 
 // --- content table validation (real content, when it exists) -----------------

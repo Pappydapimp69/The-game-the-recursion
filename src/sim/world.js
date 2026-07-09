@@ -57,6 +57,14 @@ export function makeWorld(seed = 'recursion', options = {}) {
     // salience selection needs so the voice doesn't loop the same top beat.
     director: { lastPlayed: {} },
 
+    // Cinematic mode, tracked in ONE place: activeId is the scene playing (null
+    // = gameplay). The presentation cutscene-player sets/clears it via a single
+    // MARK_CUTSCENE command with one exit path (test#E6). Kept OUT of
+    // fingerprintOf below — the demo never enters a cutscene, so the golden hash
+    // is unaffected; the watch-vs-skip test hashes the fields markers actually
+    // mutate (model/facets), which is where determinism must hold.
+    cutscene: { activeId: null },
+
     // Saga choices carried in + this run's, so the export can re-emit the chain.
     flags: {
       ended: false,
