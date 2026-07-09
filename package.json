@@ -1,0 +1,13 @@
+{
+  "name": "the-game-the-recursion",
+  "version": "0.5.0",
+  "description": "The Recursion — saga game 5. A retelling driven by a voice that learns you.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node scripts/smoke.mjs",
+    "serve": "node scripts/serve.mjs",
+    "dev": "node scripts/serve.mjs"
+  },
+  "license": "MIT"
+}
