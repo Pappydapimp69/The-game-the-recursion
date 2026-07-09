@@ -15,6 +15,9 @@ import { stableStringify } from '../src/sim/canonical.js';
 import { makeRng, seedState } from '../src/sim/rng.js';
 import { exportSaga, importSaga } from '../src/sim/saga.js';
 import { validateContent, assertValid } from '../src/sim/validate.js';
+import { createInput } from '../src/app/input.js';
+import { labelFor, hintLine } from '../src/app/device-labels.js';
+import { createTitleScreen } from '../src/app/title.js';
 
 // The golden end-state fingerprint. null until first run prints it; then baked.
 const GOLDEN = '3434e401';
@@ -116,6 +119,96 @@ function fnv1a32Local(str) {
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); }
   return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+// --- input: event-time press capture, sub-frame taps not lost ----------------
+{
+  const target = new EventTarget();
+  const input = createInput(target);
+  // No browser KeyboardEvent global under plain Node — a plain Event carrying
+  // the same {key, repeat, preventDefault} shape the handler actually reads.
+  const keydown = (key, repeat = false) => {
+    const e = new Event('keydown');
+    e.key = key; e.repeat = repeat;
+    target.dispatchEvent(e);
+  };
+  // A tap shorter than one frame: two keydowns with no sample() in between must
+  // both be queued (the-game-prologue#E2 — pure per-frame sampling would lose one).
+  keydown('Enter');
+  keydown('ArrowDown');
+  const presses = input.takePresses();
+  check('two sub-frame keydowns both queued', presses.includes('confirm') && presses.includes('down'));
+  check('takePresses drains the queue', input.takePresses().length === 0);
+  // OS auto-repeat (event.repeat=true) must NOT flood the queue.
+  keydown('z', true);
+  check('repeated keydown (OS auto-repeat) ignored', input.takePresses().length === 0);
+}
+
+// --- input: gamepad absent (no navigator.getGamepads in this Node runtime) ---
+// still yields a safe, empty sample rather than throwing — a real browser
+// exercises the actual polling path (browser parity check, run separately).
+{
+  const input2 = createInput(new EventTarget());
+  const s = input2.sample(0);
+  check('sample() never throws when no gamepad API is present', Array.isArray(s.move));
+}
+
+// --- device-labels: words, not glyphs; recomputed per device -----------------
+{
+  check('gamepad confirm label is a word (A), not a glyph', labelFor('gamepad', 'confirm') === 'A');
+  check('keyboard confirm label differs from gamepad', labelFor('keyboard', 'confirm') !== labelFor('gamepad', 'confirm'));
+  const line = hintLine('gamepad', [['confirm', 'select']]);
+  check('hintLine composes device + verb', line.includes('A') && line.includes('select'));
+}
+
+// --- title screen: EVERY field reachable and changeable (the regression the ---
+// --- old char-creation bug was: only row 0 selectable, A just started it). ---
+{
+  let began = null;
+  const title = createTitleScreen({ onBegin: (opts) => { began = opts; }, promptForCode: () => 'SAGA4.bad.bad' });
+
+  // Cursor must reach all 4 rows (archetype, difficulty, sagaCode, begin) via 'down'.
+  const seen = new Set([title.view('gamepad').rows.find((r) => r.selected).id]);
+  for (let i = 0; i < 5; i++) { title.handlePresses(['down']); seen.add(title.view('gamepad').rows.find((r) => r.selected).id); }
+  check('down-nav visits all 4 rows (not stuck on row 0)', seen.size === 4);
+
+  // Hardship (difficulty) must actually be changeable — the literal reported bug.
+  title.handlePresses(['up', 'up', 'up']); // wrap back toward archetype/difficulty
+  const before = title.view('gamepad').rows.find((r) => r.id === 'difficulty').value;
+  // Navigate cursor onto the difficulty row explicitly, then cycle it.
+  while (title.view('gamepad').rows.find((r) => r.selected).id !== 'difficulty') title.handlePresses(['down']);
+  title.handlePresses(['right']);
+  const after = title.view('gamepad').rows.find((r) => r.id === 'difficulty').value;
+  check('hardship/difficulty is selectable AND changeable', before !== after);
+
+  // An invalid saga code must not crash and must report an error, not silently import.
+  while (title.view('gamepad').rows.find((r) => r.selected).id !== 'sagaCode') title.handlePresses(['down']);
+  title.handlePresses(['confirm']);
+  check('invalid saga code reports an error, not a crash', title.view('gamepad').rows.find((r) => r.id === 'sagaCode').value.startsWith('invalid'));
+
+  // Confirming 'begin' is the ONLY thing that starts the game, and it carries
+  // the chosen difficulty (not always the default) — the other half of the bug.
+  check('game has not started yet', began === null);
+  while (title.view('gamepad').rows.find((r) => r.selected).id !== 'begin') title.handlePresses(['down']);
+  title.handlePresses(['confirm']);
+  check('confirming Begin starts the game', began !== null);
+  check('started game carries the CHOSEN difficulty, not just the default', began.difficulty === after);
+}
+
+// --- title screen: valid saga import seeds the model/choices -----------------
+{
+  const v4 = makeV4Code({ archetype: 'wanderer', difficulty: 'measured', skills: { melee: 1 },
+    choices: { ravagerFate: 'spare', riftChoice: 'seal', wardenFate: 'free', answererFate: 'answer' },
+    model: { mercy: 0.6 } });
+  let began = null;
+  const title = createTitleScreen({ onBegin: (opts) => { began = opts; }, promptForCode: () => v4 });
+  while (title.view('keyboard').rows.find((r) => r.selected).id !== 'sagaCode') title.handlePresses(['down']);
+  title.handlePresses(['confirm']);
+  check('valid saga code imports without error', title.view('keyboard').rows.find((r) => r.id === 'sagaCode').value.includes('imported'));
+  while (title.view('keyboard').rows.find((r) => r.selected).id !== 'begin') title.handlePresses(['down']);
+  title.handlePresses(['confirm']);
+  check('begin carries imported=true and the saga choices', began.imported === true && began.choices.ravagerFate === 'spare');
+  check('begin carries the imported player-model lean', began.model.mercy === 0.6);
 }
 
 // --- content table validation (real content, when it exists) -----------------
