@@ -17,6 +17,7 @@ import { createChoiceScreen } from './app/choice-screen.js';
 import { createCutscenePlayer } from './app/cutscene-player.js';
 import { createExplore } from './app/explore.js';
 import { makeSpriteSheet } from './app/sprites.js';
+import { createAudio } from './app/audio.js';
 import { PALETTE, shade } from './app/palette.js';
 import { exportSaga } from './sim/saga.js';
 import { gen, DEFAULT_SPEC, GEN_VERSION } from './sim/procgen.js';
@@ -25,7 +26,7 @@ import { axisRead } from './sim/playermodel.js';
 import { BEATS, CHOICE_POINTS, ENDINGS } from './sim/content.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p10';
+const BUILD_ID = 'p11';
 
 const STAGE_TIMING = {
   intro: { totalMs: 2400, letterbox: { inMs: 400, outMs: 400, height: 0.16 },
@@ -41,6 +42,8 @@ const ctx = canvas.getContext('2d');
 ctx.imageSmoothingEnabled = false;
 
 const input = createInput(window);
+const audio = createAudio(); // fully synthesized; safe no-op if Web Audio is unavailable
+let audioStarted = false;    // unlocked + drone started on the first real gesture
 
 // mode is the ONE source of truth for which screen is live (test#E6).
 let mode = 'title'; // 'title' | 'cutscene' | 'explore' | 'choice' | 'ended'
@@ -70,6 +73,7 @@ function newWorld(opts) { return makeWorld('recursion', { ...opts, totalChoicePo
 function startRun(opts) {
   world = newWorld(opts);
   sprites = makeSpriteSheet({ seed: world.seed });
+  audio.setChord('intro'); audio.setMood(0.15);
   beginIntro();
 }
 
@@ -92,6 +96,7 @@ function startCutscene(scene, onEnd) {
   cutscene = createCutscenePlayer(scene, { dispatch, rng });
   lastFrameMs = 0;
   cutsceneOnEnd = onEnd;
+  audio.chime(); // a soft stinger as a beat opens
   mode = 'cutscene';
 }
 function endCutscene() {
@@ -111,6 +116,7 @@ function beginIntro() {
 // "The learning" is now a walked space. Generate this run's map (pure function
 // of the seed), drop the player at the entry, and let them find the choices.
 function beginLearning() {
+  audio.setChord('learning'); audio.setMood(0.35);
   learningMap = gen(world.seed, GEN_VERSION, DEFAULT_SPEC);
   explore = createExplore(learningMap, CHOICE_POINTS, {
     onReachChoice: (assignment) => openChoice(assignment.cp, () => {
@@ -144,6 +150,7 @@ function openChoice(cp, onClose, onCommit) {
 }
 
 function beginReveal() {
+  audio.setChord('reveal'); audio.setMood(0.6);
   startCutscene(makeBeatScene('reveal'), () => {
     dispatch({ type: 'ADVANCE_SPINE' }); // reveal(2) -> hollow(3)
     beginHollow();
@@ -151,6 +158,7 @@ function beginReveal() {
 }
 
 function beginHollow() {
+  audio.setChord('hollow'); audio.setMood(0.88);
   openChoice(
     { id: 'hollow', prompt: 'The hollow waits, wearing your shape. What do you do with the voice it stole?', options: ENDINGS },
     () => { dispatch({ type: 'ADVANCE_SPINE' }); beginFinale(); }, // hollow(3) -> finale(4)
@@ -179,6 +187,10 @@ function tickFrame(nowMs) {
   prevMs = nowMs;
   animMs = nowMs;
 
+  // Audio unlocks on the FIRST real gesture (autoplay policy), fire-and-forget —
+  // never awaited (Brave's shields leave resume() pending forever; dog#E1).
+  if (!audioStarted && presses.length) { audio.resume(); audio.startDrone(); audioStarted = true; }
+
   if (mode === 'title') {
     title.handlePresses(presses);
   } else if (mode === 'cutscene') {
@@ -189,8 +201,11 @@ function tickFrame(nowMs) {
   } else if (mode === 'explore') {
     // The player's inquiry lean is the echoes' curiosity: a curious diver draws
     // the drifting voices close, a direct/guarded one keeps them at bay.
+    const px = explore ? explore.player().x : 0, py = explore ? explore.player().y : 0;
     if (explore) explore.update(move, dt, world ? axisRead('inquiry', world.playerModel.axes.inquiry).lean : 0);
+    if (explore && (explore.player().x !== px || explore.player().y !== py)) audio.step();
   } else if (mode === 'choice') {
+    if (presses.includes('confirm')) audio.confirm();
     if (choiceScreen) choiceScreen.handlePresses(presses);
   }
   return device;

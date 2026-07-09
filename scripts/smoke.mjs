@@ -26,6 +26,7 @@ import { firedMarkersUpTo, markersInWindow } from '../src/sim/cutscene.js';
 import { createCutscenePlayer } from '../src/app/cutscene-player.js';
 import { subStream } from '../src/sim/rng.js';
 import { BEATS, CHOICE_POINTS, ENDINGS } from '../src/sim/content.js';
+import { createAudio } from '../src/app/audio.js';
 
 // The golden end-state fingerprint. null until first run prints it; then baked.
 const GOLDEN = '3434e401';
@@ -508,6 +509,28 @@ function runSpine(seed, choiceIdxs, endingIdx) {
   // path main.js uses, and it's the pure/reproducible function P3 verified.
   const map = gen(w.seed, GEN_VERSION, DEFAULT_SPEC);
   check("world.seed flows into procgen exactly as main.js's beginLearning does", map.entry != null && map.exit != null);
+}
+
+// --- audio: graceful degradation (no AudioContext in Node) -------------------
+// The engine must construct and expose a full no-throw API even where Web Audio
+// doesn't exist, so the game runs fully with audio silently dead (dog#E1).
+{
+  let threw = false, a = null;
+  try { a = createAudio(); } catch { threw = true; }
+  check('createAudio() never throws, even with no AudioContext', !threw && a);
+  if (a) {
+    let anyThrew = false;
+    try {
+      a.resume(); a.startDrone(); a.setMood(0.2); a.setMood(0.9);
+      a.setChord('hollow'); a.setChord('intro');
+      a.confirm(); a.step(); a.chime();
+      if (a.cancel) a.cancel();
+      a.setEnabled(false); a.setEnabled(true);
+      if (a.setVolume) a.setVolume(0.5);
+      a.stopDrone();
+    } catch { anyThrew = true; }
+    check('every audio method is a safe no-op when audio is unavailable', !anyThrew);
+  }
 }
 
 // --- content table validation (real content, when it exists) -----------------
