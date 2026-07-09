@@ -18,7 +18,14 @@ import { makeRng } from '../sim/rng.js';
 const STEP_MS = 108; // grid-step cadence while a direction is held
 const N_ECHOES = 4;  // ambient drifting voices that inhabit the space
 
-export function createExplore(map, choicePoints, { onReachChoice, onReachExit, onGather, echoCount = 0 }) {
+const SENSE_R = 5.5;   // tiles: within this (and not on a haven) the hunter wakes
+const LEASH_R = 10;    // tiles: beyond this it gives up and settles (defend-and-reset)
+const HUNT_SPD = 4.6;  // tiles/sec while pursuing — outrunnable in a straight line, but it cuts corners
+const WANDER_SPD = 1.5;
+const CATCH_R = 0.55;  // tiles: this close and it catches you
+const STUN_MS = 1600;  // after a catch it recoils, giving you a moment
+
+export function createExplore(map, choicePoints, { onReachChoice, onReachExit, onGather, onCaught, echoCount = 0 }) {
   const { w, h, tiles } = map.grid;
 
   // Give every choice point its OWN distinct position: the interior slots first
@@ -89,6 +96,38 @@ export function createExplore(map, choicePoints, { onReachChoice, onReachExit, o
   }
   let carried = 0;
 
+  // The hunter — the hollow's reaching fragment. PRESENTATION ONLY: its only
+  // consequence is to presentation state (scatter what you carry, send you back),
+  // so the authoritative/fingerprinted core is untouched no matter what it does.
+  // Detection/comfort predator (Answering Deep kernel) + pursuit-ring leash: it
+  // wakes when you're near AND not on a lit haven, chases, and settles if you
+  // break its leash or reach a waypoint. A catch is a cheap setback (re-collect,
+  // re-navigate) — choices already made and voices already delivered stay
+  // (waiting-city#E1: attempt-based stakes are only fair when retry is cheap).
+  const hunter = (() => {
+    const hrng = makeRng(`${map.seed}:${map.attempt}:hunter`);
+    const floors = [];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (tiles[y * w + x] === FLOOR) floors.push([x, y]);
+    // Start as far from the entry as a sampled handful of floor tiles allows.
+    let best = floors[0], bestD = -1;
+    for (let i = 0; i < 24 && floors.length; i++) {
+      const [fx, fy] = hrng.pick(floors);
+      const d = Math.abs(fx - map.entry.x) + Math.abs(fy - map.entry.y);
+      if (d > bestD) { bestD = d; best = [fx, fy]; }
+    }
+    return { x: best[0] + 0.5, y: best[1] + 0.5, state: 'wander', stun: 0, wander: null, rng: hrng };
+  })();
+
+  // A "haven" is a lit waypoint (a choice slot or the encounter) — the hunter
+  // won't press you while you stand on one, which gives the map's glowing points
+  // a real second purpose. Entry/exit count too.
+  const havens = new Set([
+    map.entry.x + ',' + map.entry.y,
+    map.exit.x + ',' + map.exit.y,
+    ...assignments.map((a) => a.slot.x + ',' + a.slot.y),
+  ]);
+  const onHaven = () => havens.has(player.x + ',' + player.y);
+
   const allChoicesDone = () => assignments.every((a) => a.done);
 
   // After any step, see what the player is standing on. A pending choice fires
@@ -138,8 +177,58 @@ export function createExplore(map, choicePoints, { onReachChoice, onReachExit, o
     }
   }
 
+  // Slide the hunter one step toward (tx,ty), refusing to enter wall tiles so it
+  // follows corridors (imperfectly — it loses you around corners, which is how
+  // you escape). Axis-independent slide so it hugs walls instead of sticking.
+  function moveHunterToward(tx, ty, step) {
+    const dx = tx - hunter.x, dy = ty - hunter.y, d = Math.hypot(dx, dy) || 1;
+    const nx = hunter.x + (dx / d) * step, ny = hunter.y + (dy / d) * step;
+    if (walkable(Math.floor(nx), Math.floor(hunter.y))) hunter.x = nx;
+    if (walkable(Math.floor(hunter.x), Math.floor(ny))) hunter.y = ny;
+  }
+
+  function updateHunter(dtMs) {
+    const dts = dtMs * 0.001;
+    if (hunter.stun > 0) { hunter.stun -= dtMs; return; }
+    const px = player.x + 0.5, py = player.y + 0.5;
+    const dist = Math.hypot(hunter.x - px, hunter.y - py);
+    const safe = onHaven();
+
+    if (hunter.state === 'hunt') {
+      if (safe || dist > LEASH_R) hunter.state = 'wander';
+    } else if (!safe && dist < SENSE_R) {
+      hunter.state = 'hunt';
+    }
+
+    if (hunter.state === 'hunt') {
+      moveHunterToward(px, py, HUNT_SPD * dts);
+      if (dist < CATCH_R) {
+        // Caught: drop everything you carry back onto the map, go back to the
+        // entry, and the hunter recoils. Delivered voices and made choices stay.
+        scatter(); player.x = map.entry.x; player.y = map.entry.y; stepCd = 0;
+        hunter.stun = STUN_MS;
+        // recoil to a far tile so it isn't sitting on the entry when you respawn
+        hunter.x = map.exit.x + 0.5; hunter.y = map.exit.y + 0.5; hunter.state = 'wander';
+        if (onCaught) onCaught();
+      }
+    } else {
+      // Wander toward a slowly-refreshed drift target (a random floor tile).
+      if (!hunter.wander || Math.hypot(hunter.x - hunter.wander.x, hunter.y - hunter.wander.y) < 1) {
+        let tx = hunter.x, ty = hunter.y;
+        for (let i = 0; i < 8; i++) { const gx = hunter.rng.int(0, w - 1), gy = hunter.rng.int(0, h - 1); if (tiles[gy * w + gx] === FLOOR) { tx = gx + 0.5; ty = gy + 0.5; break; } }
+        hunter.wander = { x: tx, y: ty };
+      }
+      moveHunterToward(hunter.wander.x, hunter.wander.y, WANDER_SPD * dts);
+    }
+  }
+
+  // Drop all carried voices back at their homes (shared by the catch and the
+  // public scatterCarried) — ONE reset path (test#E8).
+  function scatter() { if (carried > 0) { for (const c of collectibles) if (c.taken) c.taken = false; carried = 0; } }
+
   function update(moveVec, dtMs, curiosity = 0) {
     driftEchoes(dtMs, curiosity); // ambient life continues even mid-step-cooldown
+    updateHunter(dtMs);
     if (resolving) return;
     stepCd -= dtMs;
     const [mx, my] = moveVec;
@@ -168,11 +257,10 @@ export function createExplore(map, choicePoints, { onReachChoice, onReachExit, o
     collectibles: () => collectibles,
     carried: () => carried,
     takeCarried: () => { const n = carried; carried = 0; return n; }, // deliver: hand off carried to be banked
-    // The hunter's stakes (P16): drop everything you're carrying back onto the
-    // map at the voices' home tiles, and send the diver back to the entry.
-    scatterCarried: () => {
-      if (carried > 0) { for (const c of collectibles) if (c.taken) c.taken = false; carried = 0; }
-    },
+    // The hunter.
+    hunter: () => hunter,
+    inDanger: () => hunter.state === 'hunt',
+    scatterCarried: scatter,
     respawnToEntry: () => { player.x = map.entry.x; player.y = map.entry.y; stepCd = 0; resolving = false; },
   };
 }

@@ -26,7 +26,7 @@ import { axisRead } from './sim/playermodel.js';
 import { BEATS, CHOICE_POINTS, ENDINGS, ECHO_COUNT } from './sim/content.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p15';
+const BUILD_ID = 'p16';
 
 const STAGE_TIMING = {
   intro: { totalMs: 2400, letterbox: { inMs: 400, outMs: 400, height: 0.16 },
@@ -60,6 +60,7 @@ let cutsceneNode = '';    // which spine node the active cutscene visualizes (P1
 let lastFrameMs = 0;      // cutscene's own capped-delta clock
 let prevMs = 0;           // general per-frame delta for exploration
 let animMs = 0;           // free-running clock for idle animation
+let caughtFlash = 0;      // ms remaining on the red 'caught' vignette (P16)
 
 let title = createTitleScreen({
   onBegin: (opts) => startRun(opts),
@@ -137,6 +138,7 @@ function beginLearning() {
   explore = createExplore(learningMap, CHOICE_POINTS, {
     echoCount: ECHO_COUNT,
     onGather: () => audio.confirm(), // a soft note as a lost voice is taken up
+    onCaught: () => { caughtFlash = 700; audio.cancel(); }, // the hunter reaches you
     onReachChoice: (assignment) => {
       // The encounter-echo is the quest-giver: reaching it also banks whatever
       // you carried this far, safe from the hunter.
@@ -228,6 +230,9 @@ function tickFrame(nowMs) {
     const px = explore ? explore.player().x : 0, py = explore ? explore.player().y : 0;
     if (explore) explore.update(move, dt, world ? axisRead('inquiry', world.playerModel.axes.inquiry).lean : 0);
     if (explore && (explore.player().x !== px || explore.player().y !== py)) audio.step();
+    if (caughtFlash > 0) caughtFlash = Math.max(0, caughtFlash - dt);
+    // The drone tightens when the hunter is on you.
+    if (explore) audio.setMood(explore.inDanger() ? 0.85 : 0.35);
   } else if (mode === 'choice') {
     if (presses.includes('confirm')) audio.confirm();
     if (choiceScreen) choiceScreen.handlePresses(presses);
@@ -377,6 +382,26 @@ function renderExplore() {
   const frame = Math.floor(animMs / 380) & 1;
   drawEntity('diver', p.x * TILE - camX, p.y * TILE - camY, frame);
 
+  // The hunter — the hollow's reaching fragment. Drawn on top; when it's hunting
+  // it flickers faster and trails a faint dread.
+  const hn = explore.hunter();
+  {
+    const hx = hn.x * TILE - camX - ENT / 2, hy = hn.y * TILE - camY - ENT / 2;
+    if (explore.inDanger()) { ctx.globalAlpha = 0.18; ctx.fillStyle = PALETTE.hollow[0];
+      ctx.beginPath(); ctx.arc(hx + ENT / 2, hy + ENT / 2, ENT * 0.7, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; }
+    drawEntitySized('hollow', hx, hy, ENT + 1, Math.floor(animMs / (explore.inDanger() ? 110 : 220)) & 1);
+  }
+
+  // Danger vignette while hunted; a sharper red flash on a fresh catch.
+  if (explore.inDanger() || caughtFlash > 0) {
+    const a = caughtFlash > 0 ? 0.28 * (caughtFlash / 700) + 0.1 : 0.14;
+    ctx.save();
+    const g = ctx.createRadialGradient(W / 2, H / 2, H * 0.28, W / 2, H / 2, H * 0.72);
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, `rgba(158,88,102,${a})`);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
   // HUD: choices left, the lost-voices quest, and the live model.
   ctx.fillStyle = PALETTE.ink[1]; ctx.font = '9px ui-monospace, monospace';
   const rem = explore.remaining();
@@ -385,6 +410,10 @@ function renderExplore() {
   const delivered = world.quest.delivered, total = world.quest.total;
   ctx.fillStyle = PALETTE.voice[1];
   ctx.fillText(`lost voices  saved ${delivered}/${total}` + (carried > 0 ? `  ·  carrying ${carried}` : ''), 8, 28);
+  if (explore.inDanger()) {
+    ctx.fillStyle = PALETTE.hollow[2];
+    ctx.fillText('the hollow has your scent — reach the light', 8, 40);
+  }
   renderModelHud();
 }
 
@@ -525,8 +554,14 @@ window.__game = {
   cutsceneActiveId: () => (world ? world.cutscene.activeId : null),
   // Exploration hooks for e2e: read the player tile, force-walk to a slot.
   explore: () => (explore ? { player: explore.player(), remaining: explore.remaining(), atExitReady: explore.atExitReady(),
-    assignments: explore.assignments.map((a) => ({ pointId: a.cp.id, slot: a.slot, done: a.done })), exit: learningMap.exit } : null),
+    assignments: explore.assignments.map((a) => ({ pointId: a.cp.id, slot: a.slot, done: a.done })), exit: learningMap.exit,
+    carried: explore.carried(), collectibles: explore.collectibles().map((c) => ({ x: c.x, y: c.y, taken: c.taken })),
+    hunter: { x: explore.hunter().x, y: explore.hunter().y, state: explore.hunter().state }, inDanger: explore.inDanger() } : null),
   exploreStep: (dx, dy, dt = 120) => { if (explore) explore.update([Math.sign(dx), Math.sign(dy)], dt); },
+  // Advance only the ambient/hunter sim (no move) — e2e drives the hunter clock.
+  exploreTick: (dt = 100) => { if (explore) explore.update([0, 0], dt); },
+  // Teleport the hunter next to the player to force a catch on the next tick (e2e).
+  forceHunterOnto: () => { if (explore) { const p = explore.player(); const hn = explore.hunter(); hn.x = p.x + 0.5; hn.y = p.y + 0.7; hn.state = 'hunt'; hn.stun = 0; } },
   sagaCode: () => sagaCode,
   learningMap: () => learningMap,
   BUILD_ID,
