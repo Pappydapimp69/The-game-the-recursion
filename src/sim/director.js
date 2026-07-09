@@ -26,6 +26,8 @@ export function buildFacts(world) {
   }
   for (const [k, v] of Object.entries(world.flags)) facts[`flags.${k}`] = v;
   for (const [k, v] of Object.entries(world.facets)) facts[`facets.${k}`] = v;
+  facts.imported = !!world.settings.imported;
+  facts['arc.choice'] = world.arc.choice || '';
   return facts;
 }
 

@@ -41,14 +41,37 @@ export function reduce(state, cmd) {
     // changes — a pure fold over these events, so it's deterministic and
     // hashable. describeModel (P4) is the single reader of the result.
     case 'RECORD_TRAIT_SIGNAL': {
-      const ax = state.playerModel.axes[cmd.axis];
-      if (ax && Number.isFinite(cmd.weight)) {
-        ax.sum += cmd.weight;
-        ax.n += 1;
-        state.playerModel.recentSignals.push({ axis: cmd.axis, weight: cmd.weight, tick: state.tick });
-        if (state.playerModel.recentSignals.length > 16) state.playerModel.recentSignals.shift();
-        events.push({ t: 'trait', axis: cmd.axis, lean: leanLabel(cmd.axis, ax) });
-      }
+      recordTrait(state, cmd.axis, cmd.weight, events);
+      break;
+    }
+
+    // "The learning" (spine stage 1): picking a choice-point option both
+    // records its trait signal AND advances the point index — via the SAME
+    // recordTrait fold RECORD_TRAIT_SIGNAL uses, so the two can never drift
+    // apart (the-game-prologue#E4: one text/data-effect path, not two copies).
+    case 'CHOOSE_OPTION': {
+      recordTrait(state, cmd.axis, cmd.weight, events);
+      state.spine.learningIdx += 1;
+      events.push({ t: 'choice', pointId: cmd.pointId });
+      break;
+    }
+
+    // Advance the FIXED spine by exactly one stage (PROPOSAL §4 — the reducer
+    // always advances through the spine in order; only the VARIANT shown at
+    // each stage varies, chosen by the director outside this file). Gating
+    // reads ONLY state already tracked (spine.totalChoicePoints, flags.ended) —
+    // never a value the command itself supplies, which a caller could simply
+    // omit to bypass. reduce.js still never imports content.js: the threshold
+    // arrived once, at world construction, as a plain number (the content-
+    // meets-code seam stays at the constructor, not scattered per-dispatch).
+    // An ungated attempt is a no-op event, not a crash or a silent skip.
+    case 'ADVANCE_SPINE': {
+      const s = state.spine;
+      let allowed = true;
+      if (s.stage === 1) allowed = s.learningIdx >= s.totalChoicePoints; // leaving 'learning'
+      if (s.stage === 3) allowed = state.flags.ended; // leaving 'hollow' — the ending must be chosen
+      if (allowed) { s.stage += 1; events.push({ t: 'spine', stage: s.stage }); }
+      else events.push({ t: 'ignored', cmd: 'ADVANCE_SPINE' });
       break;
     }
 
@@ -95,6 +118,19 @@ export function reduce(state, cmd) {
 
   commit();
   return events;
+}
+
+// The ONE trait-fold implementation — RECORD_TRAIT_SIGNAL and CHOOSE_OPTION
+// both call this rather than each keeping their own copy.
+function recordTrait(state, axis, weight, events) {
+  const ax = state.playerModel.axes[axis];
+  if (ax && Number.isFinite(weight)) {
+    ax.sum += weight;
+    ax.n += 1;
+    state.playerModel.recentSignals.push({ axis, weight, tick: state.tick });
+    if (state.playerModel.recentSignals.length > 16) state.playerModel.recentSignals.shift();
+    events.push({ t: 'trait', axis, lean: leanLabel(axis, ax) });
+  }
 }
 
 // Current signed lean on an axis as a word ('bold'/'cautious'/'—' when unknown).

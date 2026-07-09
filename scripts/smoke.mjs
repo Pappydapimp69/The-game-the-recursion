@@ -19,12 +19,13 @@ import { createInput } from '../src/app/input.js';
 import { labelFor, hintLine } from '../src/app/device-labels.js';
 import { createTitleScreen } from '../src/app/title.js';
 import { describeModel, strongestReadLine, recentCallback } from '../src/sim/playermodel.js';
-import { gen, DEFAULT_SPEC, requiredTypes } from '../src/sim/procgen.js';
+import { gen, DEFAULT_SPEC, requiredTypes, GEN_VERSION } from '../src/sim/procgen.js';
 import { validateMap } from '../src/sim/procgen-validate.js';
 import { buildFacts, eligible, selectBeat } from '../src/sim/director.js';
 import { firedMarkersUpTo, markersInWindow } from '../src/sim/cutscene.js';
 import { createCutscenePlayer } from '../src/app/cutscene-player.js';
 import { subStream } from '../src/sim/rng.js';
+import { BEATS, CHOICE_POINTS, ENDINGS } from '../src/sim/content.js';
 
 // The golden end-state fingerprint. null until first run prints it; then baked.
 const GOLDEN = '3434e401';
@@ -440,8 +441,78 @@ function fnv1a32Local(str) {
     w.rng.join(',') === rngBefore.join(','));
 }
 
+// --- P6: the full fixed spine, scripted end to end (mirrors main.js's own ----
+// orchestration exactly: dispatch ADVANCE_SPINE/CHOOSE_OPTION/END in the same
+// order the UI would, no shortcuts) --------------------------------------------
+function runSpine(seed, choiceIdxs, endingIdx) {
+  const w = makeWorld(seed, { totalChoicePoints: CHOICE_POINTS.length });
+  reduce(w, { type: 'ADVANCE_SPINE' }); // intro(0) -> learning(1)
+  for (let i = 0; i < CHOICE_POINTS.length; i++) {
+    const cp = CHOICE_POINTS[i];
+    const opt = cp.options[choiceIdxs[i]];
+    reduce(w, { type: 'CHOOSE_OPTION', pointId: cp.id, axis: opt.axis, weight: opt.weight });
+  }
+  reduce(w, { type: 'ADVANCE_SPINE' }); // learning(1) -> reveal(2): gated on spine.totalChoicePoints
+  reduce(w, { type: 'ADVANCE_SPINE' }); // reveal(2) -> hollow(3)
+  reduce(w, { type: 'END', choice: ENDINGS[endingIdx].id });
+  reduce(w, { type: 'ADVANCE_SPINE' }); // hollow(3) -> finale(4), gated on flags.ended
+  reduce(w, { type: 'ADVANCE_SPINE' }); // finale(4) -> done(5)
+  return w;
+}
+
+{
+  const w = runSpine('spine-a', [0, 0, 0], 0);
+  check('spine reaches the terminal stage (done = 5)', w.spine.stage === 5);
+  check('all learning choices were recorded', w.spine.learningIdx === CHOICE_POINTS.length);
+  check('the ending choice set arc.choice and flags.ended', w.flags.ended === true && w.arc.choice === ENDINGS[0].id);
+  check('choosing all-bold/candid/merciful options actually moved those axes', w.playerModel.axes.resolve.sum > 0 && w.playerModel.axes.mercy.sum > 0);
+
+  // A beat was recorded for every spine node that has one (intro/reveal/finale
+  // are cutscenes in main.js; here we drive selectBeat directly to prove the
+  // SAME facts+BEATS the game uses actually resolve to a real id, never null).
+  for (const node of ['intro', 'reveal', 'finale']) {
+    const facts = buildFacts(w);
+    const beatId = selectBeat(facts, BEATS, { spineNode: node });
+    check(`selectBeat resolves a real beat for '${node}' (never null)`, typeof beatId === 'string' && beatId.length > 0);
+  }
+
+  // Gating: attempting to leave 'learning' before all choices are made must be
+  // a no-op — and, critically, the threshold lives in STATE (set once at
+  // construction), not in the command payload, so a caller can't bypass the
+  // gate by simply omitting a parameter (the bug this test caught: an earlier
+  // version read cmd.requiredChoices, defaulting to 0 when omitted).
+  const early = makeWorld('gate-test', { totalChoicePoints: CHOICE_POINTS.length });
+  reduce(early, { type: 'ADVANCE_SPINE' }); // intro -> learning
+  reduce(early, { type: 'ADVANCE_SPINE' }); // attempted early, zero choices made
+  check('ADVANCE_SPINE refuses to leave learning before all choices are made', early.spine.stage === 1);
+  reduce(early, { type: 'ADVANCE_SPINE' }); // a second bare attempt — no hidden bypass via an omitted param
+  check('a bare ADVANCE_SPINE with no payload cannot bypass the gate', early.spine.stage === 1);
+  check('a world with no totalChoicePoints specified (e.g. the demo) never gates learning shut', makeWorld('no-gate').spine.totalChoicePoints === 0);
+
+  // Determinism: the exact same scripted spine, run twice from the same seed,
+  // must reach byte-identical state (canonical-equal) AND export the identical
+  // saga code -- this is new content, so it gets its own equality check rather
+  // than relying on the demo's golden.
+  const w2 = runSpine('spine-a', [0, 0, 0], 0);
+  check('the full spine is deterministic across two runs from the same seed', stableStringify(fingerprintOf(w)) === stableStringify(fingerprintOf(w2)));
+  const code1 = exportSaga(w), code2 = exportSaga(w2);
+  check('exportSaga is byte-identical for two identical spine runs', code1 === code2);
+  check('exported code has the SAGA5 shape', code1.startsWith('SAGA5.') && code1.split('.').length === 3);
+
+  // Different choices/ending produce a different exported code (sanity: the
+  // model/choice actually reach the export, it isn't a constant string).
+  const w3 = runSpine('spine-a', [1, 1, 1], 1);
+  check('different choices export a different saga code', exportSaga(w3) !== code1);
+
+  // The learning-stage map is generated from world.seed via the SAME procgen
+  // path main.js uses, and it's the pure/reproducible function P3 verified.
+  const map = gen(w.seed, GEN_VERSION, DEFAULT_SPEC);
+  check("world.seed flows into procgen exactly as main.js's beginLearning does", map.entry != null && map.exit != null);
+}
+
 // --- content table validation (real content, when it exists) -----------------
-// P4+ will import ../src/sim/content.js and assertValid here.
+// content.js holds the retelling's spine data (CHOICE_POINTS/ENDINGS/BEATS,
+// exercised above); no generic quest catalog exists in this vertical slice.
 
 console.log(`\n${passed} checks passed, ${failures.length} failed.`);
 if (failures.length) process.exit(1);

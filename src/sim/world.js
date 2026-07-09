@@ -40,6 +40,10 @@ export function makeWorld(seed = 'recursion', options = {}) {
     schemaVersion: 5,
     tick: 0,
     rng: seedState(seed),
+    // The ORIGINAL seed string, kept alongside the rng's derived state words so
+    // procgen can regenerate this run's map on demand (gen(seed, version, spec)
+    // is a pure function) rather than storing the whole tile grid in the save.
+    seed: String(seed),
     settings,
 
     player: { x: 4, y: 4, hp: 10, maxHp: 10 },
@@ -64,6 +68,18 @@ export function makeWorld(seed = 'recursion', options = {}) {
     // is unaffected; the watch-vs-skip test hashes the fields markers actually
     // mutate (model/facets), which is where determinism must hold.
     cutscene: { activeId: null },
+
+    // The fixed emotional spine (PROPOSAL §4): the reducer always advances
+    // through these stages IN ORDER; only the VARIANT shown at each stage
+    // varies, chosen by the director from the live player-model (§5.3). One
+    // stage index is the whole authoritative progress marker — no parallel
+    // "have we shown X" flags to drift out of sync with it.
+    //
+    // totalChoicePoints is set ONCE here (the caller passes content.js's
+    // CHOICE_POINTS.length) rather than re-supplied per ADVANCE_SPINE dispatch
+    // — a threshold read from a COMMAND's own payload is bypassable by simply
+    // omitting it; fixed in authoritative state at construction, it can't be.
+    spine: { stage: 0, learningIdx: 0, totalChoicePoints: options.totalChoicePoints || 0, variantOf: {} },
 
     // Saga choices carried in + this run's, so the export can re-emit the chain.
     flags: {
