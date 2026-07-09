@@ -21,6 +21,7 @@ import { createTitleScreen } from '../src/app/title.js';
 import { describeModel, strongestReadLine, recentCallback } from '../src/sim/playermodel.js';
 import { gen, DEFAULT_SPEC, requiredTypes } from '../src/sim/procgen.js';
 import { validateMap } from '../src/sim/procgen-validate.js';
+import { buildFacts, eligible, selectBeat } from '../src/sim/director.js';
 
 // The golden end-state fingerprint. null until first run prints it; then baked.
 const GOLDEN = '3434e401';
@@ -304,6 +305,53 @@ function fnv1a32Local(str) {
     const probs = validateMap(bad, DEFAULT_SPEC);
     check('validator FLAGS a disconnected required slot', probs.some((p) => p.includes("slot 'key'") && p.includes('unreachable')));
   }
+}
+
+// --- director: salience beat selection, staged not blended -------------------
+{
+  // buildFacts flattens the model into dotted keys criteria can match.
+  const w = makeWorld('director-test');
+  reduce(w, { type: 'RECORD_TRAIT_SIGNAL', axis: 'mercy', weight: 1 });
+  reduce(w, { type: 'RECORD_TRAIT_SIGNAL', axis: 'mercy', weight: 1 });
+  reduce(w, { type: 'RECORD_TRAIT_SIGNAL', axis: 'mercy', weight: 1 });
+  const facts = buildFacts(w);
+  check('buildFacts exposes axis word/lean/n/confident', facts['mercy.word'] === 'merciful' && facts['mercy.n'] === 3);
+
+  // An unrecognized/missing operator fails CLOSED, not open.
+  check('an unknown criterion operator fails closed', eligible(facts, { criteria: [{ key: 'mercy.word', nope: 'x' }] }) === false);
+  check('a beat with no criteria is always eligible (the fallback shape)', eligible(facts, {}) === true);
+
+  // Most-specific-rule-wins: a generic 0-criteria beat loses to a matching
+  // 1-criterion beat, which loses to a matching 2-criterion beat.
+  const beats = [
+    { id: 'generic', spineNode: 'intro', criteria: [] },
+    { id: 'specific-1', spineNode: 'intro', criteria: [{ key: 'mercy.word', eq: 'merciful' }] },
+    { id: 'specific-2', spineNode: 'intro', criteria: [{ key: 'mercy.word', eq: 'merciful' }, { key: 'mercy.n', gte: 2 }] },
+    { id: 'wrong', spineNode: 'intro', criteria: [{ key: 'mercy.word', eq: 'ruthless' }] },
+  ];
+  check('most-specific eligible beat wins over a generic/less-specific one', selectBeat(facts, beats, { spineNode: 'intro' }) === 'specific-2');
+
+  // Tension tie-break among equally-specific beats.
+  const tensionBeats = [
+    { id: 'calm', spineNode: 'x', criteria: [{ key: 'mercy.word', eq: 'merciful' }], tension: 0.1 },
+    { id: 'peak', spineNode: 'x', criteria: [{ key: 'mercy.word', eq: 'merciful' }], tension: 0.9 },
+  ];
+  check('tension tie-break picks the beat closest to targetTension', selectBeat(facts, tensionBeats, { spineNode: 'x', targetTension: 0.85 }) === 'peak');
+
+  // LRU: among equally-specific, equal-tension beats, an unseen one is preferred.
+  const lruBeats = [
+    { id: 'aaa', spineNode: 'y', criteria: [] },
+    { id: 'bbb', spineNode: 'y', criteria: [] },
+  ];
+  check('with none seen, deterministic id tie-break picks the lexically-first', selectBeat(facts, lruBeats, { spineNode: 'y' }) === 'aaa');
+  check('once the lexically-first has been seen, the unseen one is preferred', selectBeat(facts, lruBeats, { spineNode: 'y', lastPlayed: { aaa: 3 } }) === 'bbb');
+
+  // No eligible beat -> null, never a crash or a silent wrong pick.
+  check('selectBeat returns null when nothing is eligible', selectBeat(facts, [{ id: 'never', criteria: [{ key: 'mercy.word', eq: 'ruthless' }] }]) === null);
+
+  // BEAT_PLAYED records into world.director.lastPlayed for the next selection.
+  reduce(w, { type: 'BEAT_PLAYED', beatId: 'specific-2' });
+  check('BEAT_PLAYED records the tick a beat was shown', w.director.lastPlayed['specific-2'] === w.tick);
 }
 
 // --- content table validation (real content, when it exists) -----------------

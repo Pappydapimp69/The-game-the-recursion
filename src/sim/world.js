@@ -53,6 +53,10 @@ export function makeWorld(seed = 'recursion', options = {}) {
     // the voice learns you (world-facets-as-reward, Wrong Sky).
     facets: { color: options.imported ? 1 : 0, light: 0, depth: 0 },
 
+    // The director's memory of what it has already shown — the LRU tie-break
+    // salience selection needs so the voice doesn't loop the same top beat.
+    director: { lastPlayed: {} },
+
     // Saga choices carried in + this run's, so the export can re-emit the chain.
     flags: {
       ended: false,

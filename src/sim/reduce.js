@@ -52,6 +52,16 @@ export function reduce(state, cmd) {
       break;
     }
 
+    // The director selected and showed a beat — record it so the LRU stage of
+    // the next selectBeat() call knows not to loop the same top pick.
+    case 'BEAT_PLAYED': {
+      if (cmd.beatId) {
+        state.director.lastPlayed[cmd.beatId] = state.tick;
+        events.push({ t: 'beat', beatId: cmd.beatId });
+      }
+      break;
+    }
+
     case 'RESTORE_FACET': {
       if (cmd.facet in state.facets) {
         state.facets[cmd.facet] = 1;
