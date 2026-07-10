@@ -25,9 +25,10 @@ import { buildFacts, selectBeat } from './sim/director.js';
 import { axisRead } from './sim/playermodel.js';
 import { BEATS, CHOICE_POINTS, ENDINGS, ECHO_COUNT, MAX_DEPTH, ABILITIES } from './sim/content.js';
 import { labelFor } from './app/device-labels.js';
+import { createTouchControls, isTouchCapable } from './app/touch-controls.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p23';
+const BUILD_ID = 'p24';
 
 // Each descent level's procgen mission spec: depth 1 is the ORIGINAL single-
 // floor spec byte-for-byte; each floor after that adds one more gate+encounter
@@ -126,6 +127,13 @@ window.addEventListener('resize', fitCanvas);
 window.addEventListener('orientationchange', fitCanvas);
 
 const input = createInput(window);
+// A touch-capable device (phone, tablet, hybrid laptop) gets the on-screen
+// control layer unconditionally — it was declared as coming "(P-later)" in
+// input.js's own comment and never actually built, which left the whole game
+// unreachable on any device with no keyboard/gamepad (can't even leave the
+// title screen). Gated on capability, not on `activeDevice === 'touch'`, so
+// it's present from the very first frame, before any touch has happened yet.
+if (isTouchCapable()) createTouchControls(stage, input);
 const audio = createAudio(); // fully synthesized; safe no-op if Web Audio is unavailable
 let audioStarted = false;    // unlocked + drone started on the first real gesture
 

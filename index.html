@@ -17,16 +17,39 @@
        large enough to reach the viewport edge). */
     body { display: flex; flex-direction: column; }
     #stage { flex: 1 1 auto; min-height: 0; width: 100vw; width: 100dvw;
-      display: flex; align-items: center; justify-content: center; }
+      display: flex; align-items: center; justify-content: center; position: relative; }
     canvas { image-rendering: pixelated; background: #05060a; touch-action: none;
       max-width: 100%; max-height: 100%; }
     #build { flex: 0 0 auto; padding: 4px 6px; font: 10px/1.2 ui-monospace, monospace;
       color: #45506a; pointer-events: none; user-select: none; }
+
+    /* On-screen touch controls (app/touch-controls.js) — only created at all on
+       a touch-capable device. Positioned over #stage (not the canvas directly)
+       so they land in whatever empty space the flex layout leaves around a
+       small/portrait-scaled canvas, and still overlay sensibly on a touch
+       tablet where the canvas fills more of the screen. */
+    #touch-ui { position: absolute; inset: 0; pointer-events: none; z-index: 5;
+      user-select: none; -webkit-user-select: none; touch-action: none; }
+    #touch-ui .tc-dpad, #touch-ui .tc-actions { position: absolute; bottom: 14px; display: grid; pointer-events: auto; gap: 6px; }
+    #touch-ui .tc-dpad { left: 14px; grid-template-columns: 44px 44px 44px; grid-template-rows: 44px 44px 44px;
+      grid-template-areas: ". up ." "left . right" ". down ."; }
+    #touch-ui .tc-actions { right: 14px; grid-template-columns: 52px 52px; grid-template-rows: 52px 52px;
+      grid-template-areas: "action cancel" "skip confirm"; }
+    #touch-ui .tc-up { grid-area: up; } #touch-ui .tc-down { grid-area: down; }
+    #touch-ui .tc-left { grid-area: left; } #touch-ui .tc-right { grid-area: right; }
+    #touch-ui .tc-action-btn.tc-y { grid-area: action; } #touch-ui .tc-action-btn.tc-b { grid-area: cancel; }
+    #touch-ui .tc-action-btn.tc-x { grid-area: skip; } #touch-ui .tc-action-btn.tc-a { grid-area: confirm; }
+    #touch-ui .tc-btn { background: rgba(223,228,239,0.14); border: 1px solid rgba(223,228,239,0.28);
+      border-radius: 10px; color: #dfe4ef; font: 9px ui-monospace, monospace; display: flex;
+      align-items: center; justify-content: center; text-align: center; line-height: 1.15;
+      -webkit-tap-highlight-color: transparent; padding: 0; }
+    #touch-ui .tc-dir { font-size: 16px; }
+    #touch-ui .tc-btn:active, #touch-ui .tc-btn.tc-held { background: rgba(230,193,90,0.32); border-color: rgba(230,193,90,0.55); }
   </style>
 </head>
 <body>
   <div id="stage"><canvas id="screen" width="320" height="240"></canvas></div>
   <div id="build">the recursion · loading…</div>
-  <script type="module" src="./src/main.js?v=p23"></script>
+  <script type="module" src="./src/main.js?v=p24"></script>
 </body>
 </html>

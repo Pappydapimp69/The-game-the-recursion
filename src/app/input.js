@@ -46,6 +46,7 @@ const STICK_REPEAT_MS = 180; // debounce for stick-as-menu-nav
 
 export function createInput(target = (typeof window !== 'undefined' ? window : null)) {
   const heldKeys = new Set();
+  const touchHeld = new Set(); // named presses currently held via an on-screen touch button
   const pressQueue = [];
   let activeDevice = 'keyboard'; // 'keyboard' | 'gamepad' | 'touch'
   let touchMove = [0, 0];
@@ -69,8 +70,9 @@ export function createInput(target = (typeof window !== 'undefined' ? window : n
       if (p) { pressQueue.push(p); e.preventDefault(); }
     });
     target.addEventListener('keyup', (e) => heldKeys.delete(e.key));
-    // Touch/mouse mark the device active; the on-screen control layer (P-later)
-    // sets touchMove and enqueues presses through setTouchMove/pressTouch.
+    // Touch/mouse mark the device active; the on-screen control layer
+    // (app/touch-controls.js) drives movement/presses through
+    // setTouchMove/pressTouchDown/pressTouchUp below.
     target.addEventListener('touchstart', () => { activeDevice = 'touch'; }, { passive: true });
     target.addEventListener('pointerdown', () => { if (activeDevice !== 'gamepad') activeDevice = 'mouse'; });
   }
@@ -149,12 +151,25 @@ export function createInput(target = (typeof window !== 'undefined' ? window : n
     if (gamepadConnected) {
       for (let i = 0; i < prevButtons.length; i++) { if (prevButtons[i] && GP_PRESS[i] === name) return true; }
     }
-    return false;
+    return touchHeld.has(name);
   }
 
-  // Test/touch hooks — the harness is just another device.
+  // Test hook — the headless harness is just another device.
   function injectPress(name) { pushPress(name, activeDevice === 'gamepad' ? 'gamepad' : 'keyboard'); }
+
+  // The on-screen touch control layer (app/touch-controls.js): a button's
+  // touchstart both fires an edge press (menu nav, one-shot actions) AND marks
+  // it HELD (so isHeld('skip') — the cutscene hold-to-dismiss gesture — works
+  // from a touch button exactly like a held key or gamepad button); touchend
+  // clears the held mark. Two different calls because "pressed once" and
+  // "held right now" are different questions or the wrong-sky/prologue#E7
+  // hold-counter contract would have to special-case touch.
+  function pressTouchDown(name) { touchHeld.add(name); pushPress(name, 'touch'); }
+  function pressTouchUp(name) { touchHeld.delete(name); }
   function setTouchMove(vec) { touchMove = [Math.sign(vec[0] || 0), Math.sign(vec[1] || 0)]; }
 
-  return { sample, takePresses, injectPress, setTouchMove, isHeld, device: () => activeDevice };
+  return {
+    sample, takePresses, injectPress, setTouchMove, isHeld, device: () => activeDevice,
+    pressTouchDown, pressTouchUp,
+  };
 }
