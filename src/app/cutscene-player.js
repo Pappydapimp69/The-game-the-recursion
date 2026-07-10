@@ -7,12 +7,16 @@
 // the marker contract in sim/cutscene.js — lands byte-identical to watching.
 // Precedent: research-cutscenes.md §1/§2/§4; PROPOSAL §5.1.
 //
-// Known simplification (honest): with no TTS/audio integration in the repo yet,
-// captions advance off the cutscene's own elapsed ms, NOT real speaking state.
-// The caption clock is injected (`captionMsOf`, default = elapsed) so a later
-// pass can swap in polled audio.currentTime / SpeechSynthesis onboundary without
-// touching this file's structure — the research brief's "sync to REAL speaking
-// state, not estimated reading time" is deferred, not designed out.
+// Dialogue is PLAYER-PACED, not clock-paced (design change: a fixed per-line
+// timer either cuts a line off mid-type for a slow reader or drags for a fast
+// one — no fixed number is right for everyone). advanceCaption() is the one
+// entry point: a press either instantly completes the current line's
+// typewriter reveal, or — once it's fully revealed — steps to the next line.
+// This is entirely independent of `elapsed`/`advance()`/`skip()` below, which
+// keep driving markers, the entity animation, and the letterbox exactly as
+// before (untouched — that machinery is what the watch-vs-skip determinism
+// contract in scripts/smoke.mjs verifies, and this file must not put that at
+// risk just to make captions player-paced).
 
 import { markersInWindow } from '../sim/cutscene.js';
 
@@ -22,23 +26,28 @@ import { markersInWindow } from '../sim/cutscene.js';
 // cap keeps cosmetics and pacing sane after a hitch.
 const MAX_DELTA_MS = 50;
 
-// Typewriter reveal rate, in characters per 1000 units of the scene's OWN
-// elapsed clock — NOT per real-world ms. main.js feeds this player a
-// slowed-down dt (its CUTSCENE_SPEED knob), so the reveal automatically paces
-// with whatever real-time speed the caller chooses, with no second knob to
-// keep in sync. Exported so the caller can size each caption's own on-screen
-// window off the SAME rate its text will actually type at (a caption windowed
-// too tight for its length gets replaced by the next line mid-type — the
-// authored per-beat timing predates the typewriter and was tuned to the old
-// instant-reveal captions, not this rate).
+// Typewriter reveal rate, in characters per 1000 units of its OWN presentation
+// clock (`typeElapsed`, below) — NOT per real-world ms. main.js feeds this
+// player a slowed-down dt (its CUTSCENE_SPEED knob), so the reveal
+// automatically paces with whatever real-time speed the caller chooses.
 export const CHARS_PER_SEC = 90;
 
-export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf = null } = {}) {
+export function createCutscenePlayer(scene, { dispatch, rng = null } = {}) {
   let elapsed = 0;
   let lastFiredMs = -1; // below 0 so an atMs:0 marker fires on the first advance
   let ended = false;
   let started = false;
   let firedCount = 0;
+
+  // A SEPARATE, never-capped, never-frozen presentation clock for the
+  // typewriter only. `elapsed` clamps at scene.totalMs and freezes once ended
+  // — fine for markers/entity/letterbox, which are done by then, but a slow
+  // reader who's still mid-dialogue when that ceiling is reached must not
+  // have their current line's reveal freeze along with it.
+  let typeElapsed = 0;
+  let captionIndex = 0;
+  let lineStartMs = 0;   // typeElapsed value when the CURRENT line began
+  let lineForced = false; // true once a press force-completed the current line's reveal
 
   // Cosmetic particle flourish (optional): positions drawn from an injected
   // cosmetic RNG seeded (saveSeed, sceneId) and kept OUT of the authoritative
@@ -50,6 +59,8 @@ export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf 
       particles.push({ x: rng.int(0, 320), y: rng.int(0, 240), life: rng.int(30, 90) });
     }
   }
+
+  function captionsList() { return (scene.cosmeticTracks && scene.cosmeticTracks.captions) || []; }
 
   function fireWindow(prevMs, curMs) {
     for (const marker of markersInWindow(scene, prevMs, curMs)) {
@@ -75,9 +86,10 @@ export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf 
   // Advance the presentation clock by a real frame delta and fire any newly
   // crossed markers. Returns whether the scene is still running.
   function advance(dtMs) {
+    const step = Math.max(0, Math.min(dtMs, MAX_DELTA_MS));
+    typeElapsed += step;
     if (ended) return false;
     if (!started) start();
-    const step = Math.max(0, Math.min(dtMs, MAX_DELTA_MS));
     const prev = elapsed;
     elapsed = Math.min(scene.totalMs, elapsed + step);
     fireWindow(prev, elapsed);
@@ -95,17 +107,50 @@ export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf 
     finish();
   }
 
-  // Sample the cosmetic tracks at the current caption/elapsed ms. Pure read of
-  // scene data — no sim access. Letterbox bars animate 0->height over inMs and
-  // back over the final outMs; the active caption is the last one reached.
+  // How much of the CURRENT line is revealed right now.
+  function revealedChars() {
+    const captions = captionsList();
+    const text = captions[captionIndex] ? captions[captionIndex].text || captions[captionIndex] : '';
+    if (lineForced) return String(text).length;
+    return Math.max(0, Math.floor((typeElapsed - lineStartMs) * CHARS_PER_SEC / 1000));
+  }
+
+  function currentLineDone() {
+    const captions = captionsList();
+    const text = captions[captionIndex] ? (captions[captionIndex].text || captions[captionIndex]) : '';
+    return revealedChars() >= String(text).length;
+  }
+
+  function isAtLastLine() {
+    const captions = captionsList();
+    return captions.length === 0 || captionIndex >= captions.length - 1;
+  }
+
+  // The player's one dialogue input: press-to-advance. First press on a
+  // still-typing line snaps it to fully revealed (never SKIPS a line's
+  // content, just stops making the player wait for it); a press once it's
+  // fully revealed steps to the next line. On the last, fully-revealed line
+  // this is a no-op — main.js gates leaving the scene on the hold-to-dismiss
+  // gesture instead, never on a plain confirm press.
+  function advanceCaption() {
+    if (!currentLineDone()) { lineForced = true; return; }
+    const captions = captionsList();
+    if (captionIndex < captions.length - 1) {
+      captionIndex++;
+      lineStartMs = typeElapsed;
+      lineForced = false;
+    }
+  }
+
+  // Sample the cosmetic tracks. Pure read of scene data — no sim access.
+  // Letterbox bars animate 0->height over inMs and back over the final outMs.
   function cosmetics() {
-    const ms = captionMsOf ? captionMsOf() : elapsed;
-    const tracks = scene.cosmeticTracks || {};
-    const cap = activeCaptionEntry(tracks.captions, ms);
+    const captions = captionsList();
+    const entry = captions[captionIndex];
+    const text = entry ? (entry.text || entry) : '';
     return {
-      letterbox: letterboxFrac(tracks.letterbox, elapsed, scene.totalMs),
-      caption: cap.text,
-      captionAtMs: cap.atMs,
+      letterbox: letterboxFrac(scene.cosmeticTracks && scene.cosmeticTracks.letterbox, elapsed, scene.totalMs),
+      caption: text,
     };
   }
 
@@ -147,9 +192,7 @@ export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf 
     // Word-wrap against the FULL line first — line-break points must stay
     // fixed for the whole reveal, or text would visibly reflow as it types.
     const fullLines = c.caption ? wrapLines(ctx, c.caption, W - MARGIN * 2) : [];
-    const ms = captionMsOf ? captionMsOf() : elapsed;
-    const revealChars = c.caption ? Math.floor(Math.max(0, ms - c.captionAtMs) * CHARS_PER_SEC / 1000) : 0;
-    const shownLines = revealLines(fullLines, revealChars);
+    const shownLines = revealLines(fullLines, revealedChars());
 
     // Letterbox bars, drawn LAST in screen space (integer-snapped, no
     // smoothing). The bottom bar is sized off the FULL line count (its
@@ -175,11 +218,13 @@ export function createCutscenePlayer(scene, { dispatch, rng = null, captionMsOf 
   }
 
   return {
-    advance, skip, draw, cosmetics,
+    advance, skip, draw, cosmetics, advanceCaption,
     isEnded: () => ended,
     elapsedMs: () => elapsed,
     totalMs: () => scene.totalMs,
     firedCount: () => firedCount,
+    isCurrentLineDone: currentLineDone,
+    isAtLastLine,
     sceneId: scene.id,
   };
 }
@@ -193,17 +238,6 @@ function letterboxFrac(lb, ms, totalMs) {
   if (inMs > 0 && ms < inMs) return h * (ms / inMs);
   if (outMs > 0 && ms > totalMs - outMs) return h * Math.max(0, (totalMs - ms) / outMs);
   return h;
-}
-
-// Active caption = the last one whose atMs has been reached. Existence-checked
-// (not truthy) so an empty-string caption is still valid (wrong-sky#E5).
-// Returns the entry (text + its OWN atMs), so the typewriter reveal can time
-// itself from when THIS line started, not from scene start.
-function activeCaptionEntry(captions, ms) {
-  if (!Array.isArray(captions)) return { text: '', atMs: 0 };
-  let cur = { text: '', atMs: 0 };
-  for (const c of captions) { if (c.atMs <= ms) cur = c; }
-  return cur;
 }
 
 // Truncate a set of already-fixed word-wrapped lines down to the first `n`

@@ -14,7 +14,7 @@ import { FLOOR } from './sim/procgen.js';
 import { createInput } from './app/input.js';
 import { createTitleScreen } from './app/title.js';
 import { createChoiceScreen } from './app/choice-screen.js';
-import { createCutscenePlayer, CHARS_PER_SEC } from './app/cutscene-player.js';
+import { createCutscenePlayer } from './app/cutscene-player.js';
 import { createExplore } from './app/explore.js';
 import { makeSpriteSheet } from './app/sprites.js';
 import { createAudio } from './app/audio.js';
@@ -27,7 +27,7 @@ import { BEATS, CHOICE_POINTS, ENDINGS, ECHO_COUNT } from './sim/content.js';
 import { labelFor } from './app/device-labels.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p21';
+const BUILD_ID = 'p22';
 
 // A cutscene shares its skip control with nothing else, but a bare tap can
 // still eat a story beat by accident — require a deliberate ~1.2s HOLD instead
@@ -53,6 +53,16 @@ const STAGE_TIMING = {
   finale: { totalMs: 2600, letterbox: { inMs: 400, outMs: 500, height: 0.2 },
     extraMarkers: [{ atMs: 1200, cmd: { type: 'RESTORE_FACET', facet: 'color' } }] },
 };
+
+// The cutscene-player's own internal clock (markers/entity-easing/letterbox)
+// is separate from how long the PLAYER takes to read: dialogue now advances
+// only on a confirm press (see tickFrame's 'cutscene' branch), which can run
+// well past STAGE_TIMING's short authored totalMs. Give scene.totalMs a
+// generous ceiling so that clock has no reason to bottom out mid-read (the
+// entity animation itself still eases against the SHORT authored totalMs
+// below, via renderCutsceneEntity — these are deliberately two different
+// numbers for two different jobs).
+const SCENE_TIME_CEILING_MS = 20000;
 
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
@@ -101,7 +111,6 @@ let sprites = null;       // the procedural sprite sheet, set once a world exist
 let cutsceneNode = '';    // which spine node the active cutscene visualizes (P12)
 let lastFrameMs = 0;      // cutscene's own capped-delta clock
 let cutsceneHoldMs = 0;   // authoritative hold-to-skip counter (p19)
-let cutsceneSkipped = false; // true only when THIS scene ended via hold-to-skip, not the natural clock
 let prevMs = 0;           // general per-frame delta for exploration
 let animMs = 0;           // free-running clock for idle animation
 let caughtFlash = 0;      // ms remaining on the red 'caught' vignette (P16)
@@ -138,31 +147,14 @@ function deliverCarried() {
 }
 
 // --- cutscene plumbing -------------------------------------------------------
-// A line's own on-screen window: long enough for the typewriter (cutscene-
-// player's CHARS_PER_SEC) to fully reveal it, plus a fixed pause to actually
-// read the finished line. Dividing the authored totalMs evenly by line count
-// (the old approach) was tuned before the typewriter existed — most of these
-// lines run well past 90 chars, so an even split cut them off mid-type the
-// instant the next line's atMs arrived.
-const READ_PAUSE_MS = 500;
-function lineWindowMs(text) {
-  return Math.max(600, Math.round((text.length / CHARS_PER_SEC) * 1000)) + READ_PAUSE_MS;
-}
-
 function makeBeatScene(spineNode) {
   const facts = buildFacts(world);
   const beatId = selectBeat(facts, BEATS, { spineNode, lastPlayed: world.director.lastPlayed });
   const beat = BEATS.find((b) => b.id === beatId) || { lines: ['...'] };
   dispatch({ type: 'BEAT_PLAYED', beatId });
   const timing = STAGE_TIMING[spineNode];
-  let t = 150;
-  const captions = beat.lines.map((text) => { const atMs = t; t += lineWindowMs(text); return { atMs, text }; });
-  // The scene never runs SHORTER than authored (so the entity animation and
-  // any cmdMarkers keep their tuned pacing), but grows to fit whatever the
-  // dialogue actually needs, plus the letterbox's own fade-out.
-  const totalMs = Math.max(timing.totalMs, t + (timing.letterbox.outMs || 0));
-  return { id: `${spineNode}:${beatId}`, totalMs, cmdMarkers: timing.extraMarkers || [],
-    cosmeticTracks: { letterbox: timing.letterbox, captions } };
+  return { id: `${spineNode}:${beatId}`, totalMs: SCENE_TIME_CEILING_MS, cmdMarkers: timing.extraMarkers || [],
+    cosmeticTracks: { letterbox: timing.letterbox, captions: beat.lines } };
 }
 
 function startCutscene(scene, onEnd) {
@@ -170,7 +162,6 @@ function startCutscene(scene, onEnd) {
   cutscene = createCutscenePlayer(scene, { dispatch, rng });
   lastFrameMs = 0;
   cutsceneHoldMs = 0;
-  cutsceneSkipped = false;
   cutsceneOnEnd = onEnd;
   cutsceneNode = scene.id.split(':')[0];
   audio.chime(); // a soft stinger as a beat opens
@@ -280,22 +271,24 @@ function tickFrame(nowMs) {
   if (mode === 'title') {
     title.handlePresses(presses);
   } else if (mode === 'cutscene') {
+    // Dialogue is entirely player-paced: a confirm press either completes the
+    // current line's typewriter reveal instantly or, once it's fully shown,
+    // steps to the next line. It is a no-op on the last, fully-revealed line
+    // — leaving the scene is ALWAYS the deliberate hold-to-dismiss gesture
+    // below, never a plain tap, whether that hold happens early (skipping
+    // ahead) or only once every line has actually been read.
+    if (presses.includes('confirm')) cutscene.advanceCaption();
+    let cutsceneEnding = false;
     if (input.isHeld('skip')) {
       cutsceneHoldMs += dt;
-      if (cutsceneHoldMs >= HOLD_DISMISS_MS) { cutscene.skip(); cutsceneSkipped = true; }
+      if (cutsceneHoldMs >= HOLD_DISMISS_MS) { cutscene.skip(); cutsceneEnding = true; }
     } else {
       cutsceneHoldMs = 0;
     }
-    if (!cutscene.isEnded()) {
-      const cdt = lastFrameMs ? (nowMs - lastFrameMs) * CUTSCENE_SPEED : 0;
-      cutscene.advance(cdt);
-    }
+    const cdt = lastFrameMs ? (nowMs - lastFrameMs) * CUTSCENE_SPEED : 0;
+    cutscene.advance(cdt);
     lastFrameMs = nowMs;
-    // A deliberate hold-to-skip advances immediately (the player already made
-    // the call). Reaching the end NATURALLY never auto-advances on its own —
-    // it waits for an explicit confirm, so nobody gets yanked into the next
-    // beat mid-read just because the clock ran out.
-    if (cutscene.isEnded() && (cutsceneSkipped || presses.includes('confirm'))) endCutscene();
+    if (cutsceneEnding) endCutscene();
   } else if (mode === 'explore') {
     // The player's inquiry lean is the echoes' curiosity: a curious diver draws
     // the drifting voices close, a direct/guarded one keeps them at bay.
@@ -500,10 +493,10 @@ function renderChoice(device) {
   ctx.fillStyle = PALETTE.ink[0]; ctx.font = '10px ui-monospace, monospace';
   wrapText(v.prompt, 12, 40, W - 24, 13);
   let ty = 100;
+  const optMaxW = W - 16 - 16 - ctx.measureText('> ').width;
   for (const o of v.options) {
     ctx.fillStyle = o.selected ? PALETTE.voice[1] : PALETTE.ink[1];
-    ctx.fillText((o.selected ? '> ' : '  ') + o.label, 16, ty);
-    ty += 18;
+    ty = wrapOption(o.label, o.selected ? '> ' : '  ', 16, ty, optMaxW, 13) + 5;
   }
   ctx.fillStyle = PALETTE.ink[3]; ctx.font = '8px ui-monospace, monospace';
   ctx.fillText(v.hint, 16, H - 12);
@@ -547,6 +540,25 @@ function wrapText(text, x, y, maxW, lineH) {
     else line = test;
   }
   if (line) ctx.fillText(line, x, ty);
+}
+
+// Like wrapText, but for a "> label" choice row: the selection marker only
+// goes on the row's FIRST line, continuation lines indent under it — an
+// option's label used to run a single fillText() straight off the canvas
+// edge on any narrow (mobile) viewport with no wrap at all. Returns the y of
+// the last line drawn, so the caller can stack the next option beneath it.
+function wrapOption(label, prefix, x, y, maxW, lineH) {
+  const words = String(label).split(' ');
+  let line = '', ty = y, first = true;
+  for (const word of words) {
+    const test = line ? line + ' ' + word : word;
+    if (ctx.measureText(test).width > maxW && line) {
+      ctx.fillText((first ? prefix : '  ') + line, x, ty);
+      line = word; ty += lineH; first = false;
+    } else line = test;
+  }
+  if (line) { ctx.fillText((first ? prefix : '  ') + line, x, ty); ty += lineH; }
+  return ty;
 }
 
 // The cinematic layer: a single animated entity per beat, breathing and lit,
@@ -596,26 +608,31 @@ function renderCutsceneEntity(node, tMs, totalMs) {
 }
 
 // Cutscene control hint, in the ACTIVE device's own language (never baked at
-// construct time — the-game-prologue#E3/#E6). Two distinct states: mid-scene
-// it's a hold-to-skip hint + progress bar (the bar only appears once the
-// player has actually started holding, so it doesn't clutter a cutscene
-// someone's just watching); once the scene has fully played out, skip is
-// moot and it becomes a plain "continue" prompt instead.
+// construct time — the-game-prologue#E3/#E6). Two distinct states: while
+// there's more dialogue, confirm advances it and a hold-to-skip escape hatch
+// is always available too; once the last line has actually been read, confirm
+// is a no-op and the ONLY way out is the same hold gesture (now framed as
+// "end" rather than "skip" — same button, same authoritative counter).
 function renderHoldToSkip(device) {
   const W = canvas.width;
   ctx.font = '8px ui-monospace, monospace';
   ctx.fillStyle = PALETTE.ink[3];
   ctx.textAlign = 'right';
-  if (cutscene.isEnded()) {
-    ctx.fillText(`${labelFor(device, 'confirm')} to continue`, W - 8, 14);
+  const atEnd = cutscene.isAtLastLine() && cutscene.isCurrentLineDone();
+  let barY;
+  if (atEnd) {
+    ctx.fillText(`hold ${labelFor(device, 'skip')} to end`, W - 8, 14);
+    barY = 18;
   } else {
-    ctx.fillText(`hold ${labelFor(device, 'skip')} to skip`, W - 8, 14);
-    if (cutsceneHoldMs > 0) {
-      const frac = Math.min(1, cutsceneHoldMs / HOLD_DISMISS_MS);
-      const barW = 60, barH = 4, bx = W - 8 - barW, by = 18;
-      ctx.fillStyle = PALETTE.ink[3]; ctx.fillRect(bx, by, barW, barH);
-      ctx.fillStyle = PALETTE.voice[1]; ctx.fillRect(bx, by, barW * frac, barH);
-    }
+    ctx.fillText(`${labelFor(device, 'confirm')} to continue`, W - 8, 14);
+    ctx.fillText(`hold ${labelFor(device, 'skip')} to skip`, W - 8, 24);
+    barY = 28;
+  }
+  if (cutsceneHoldMs > 0) {
+    const frac = Math.min(1, cutsceneHoldMs / HOLD_DISMISS_MS);
+    const barW = 60, barH = 4, bx = W - 8 - barW;
+    ctx.fillStyle = PALETTE.ink[3]; ctx.fillRect(bx, barY, barW, barH);
+    ctx.fillStyle = PALETTE.voice[1]; ctx.fillRect(bx, barY, barW * frac, barH);
   }
   ctx.textAlign = 'left';
 }
@@ -627,7 +644,7 @@ function render(nowMs) {
   else if (mode === 'cutscene') {
     ctx.fillStyle = PALETTE.void; ctx.fillRect(0, 0, canvas.width, canvas.height);
     if (cutscene) {
-      renderCutsceneEntity(cutsceneNode, cutscene.elapsedMs(), cutscene.totalMs());
+      renderCutsceneEntity(cutsceneNode, cutscene.elapsedMs(), STAGE_TIMING[cutsceneNode] ? STAGE_TIMING[cutsceneNode].totalMs : 2400);
       cutscene.draw(ctx);
       renderHoldToSkip(device);
     }
@@ -651,7 +668,7 @@ window.__game = {
   forceBegin: (opts) => startRun(opts),
   runScript: (seed = 'recursion-smoke') => { world = makeWorld(seed); for (const c of demoScript()) reduce(world, c); return fingerprint(fingerprintOf(world)); },
   cutscene: () => (cutscene ? { id: cutscene.sceneId, elapsedMs: cutscene.elapsedMs(), firedCount: cutscene.firedCount(), ended: cutscene.isEnded(), cosmetics: cutscene.cosmetics() } : null),
-  skipCutscene: () => { if (cutscene) { cutscene.skip(); cutsceneSkipped = true; } },
+  skipCutscene: () => { if (cutscene) { cutscene.skip(); endCutscene(); } },
   cutsceneActiveId: () => (world ? world.cutscene.activeId : null),
   // Exploration hooks for e2e: read the player tile, force-walk to a slot.
   explore: () => (explore ? { player: explore.player(), remaining: explore.remaining(), atExitReady: explore.atExitReady(),
