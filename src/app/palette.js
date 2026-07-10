@@ -23,6 +23,16 @@ export const PALETTE = {
   // The hollow — the thing at the bottom wearing your shape. Muted warm. 3-step.
   hollow: ['#5c3540', '#9e5866', '#c88996'],
 
+  // The warden — a stationary area-denial guardian met from depth 2. Sickly
+  // moss-green, unlike anything else in the palette, so it reads as
+  // territorial/plantlike rather than another pursuer.
+  warden: ['#2f4a2e', '#5c8a52', '#9bc98a'],
+
+  // The screamer — a fast alert-creature met from depth 3. Sharp violet, the
+  // one hot/saturated color in an otherwise cold-and-muted palette, so it
+  // reads as an alarm the instant it's on screen.
+  screamer: ['#5a2a5e', '#a144a8', '#dd7fe0'],
+
   // Text tiers, brightest -> dimmest.
   ink: ['#dfe4ef', '#aeb8cf', '#7684a0', '#4a5670'],
 };

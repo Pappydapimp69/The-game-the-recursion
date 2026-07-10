@@ -68,10 +68,40 @@ export function reduce(state, cmd) {
     case 'ADVANCE_SPINE': {
       const s = state.spine;
       let allowed = true;
-      if (s.stage === 1) allowed = s.learningIdx >= s.totalChoicePoints; // leaving 'learning'
+      // Leaving 'learning' requires EVERY choice made AND every descent level
+      // actually reached — belt-and-suspenders with ADVANCE_DEPTH's own gate
+      // below (both should coincide by construction, since the last depth's
+      // quota equals totalChoicePoints, but a command payload is never trusted
+      // to prove that on its own).
+      if (s.stage === 1) allowed = s.learningIdx >= s.totalChoicePoints && state.depth >= state.maxDepth;
       if (s.stage === 3) allowed = state.flags.ended; // leaving 'hollow' — the ending must be chosen
       if (allowed) { s.stage += 1; events.push({ t: 'spine', stage: s.stage }); }
       else events.push({ t: 'ignored', cmd: 'ADVANCE_SPINE' });
+      break;
+    }
+
+    // Step to the next descent level WITHIN 'learning' (stage 1). Gated on the
+    // SAME kind of construction-fixed threshold as ADVANCE_SPINE — the current
+    // depth's own quota (spine.depthQuotas), never a value the command supplies.
+    case 'ADVANCE_DEPTH': {
+      const s = state.spine;
+      const quota = s.depthQuotas[state.depth - 1];
+      const allowed = s.stage === 1 && state.depth < state.maxDepth && typeof quota === 'number' && s.learningIdx >= quota;
+      if (allowed) { state.depth += 1; events.push({ t: 'depth', depth: state.depth }); }
+      else events.push({ t: 'ignored', cmd: 'ADVANCE_DEPTH' });
+      break;
+    }
+
+    // Grant a player ability. Existence-gated: `id` must already be a known key
+    // in state.abilities (fixed at world construction) — a command can request
+    // an unlock, never invent a new ability slot (prologue#E9).
+    case 'UNLOCK_ABILITY': {
+      if (cmd.id in state.abilities && !state.abilities[cmd.id]) {
+        state.abilities[cmd.id] = true;
+        events.push({ t: 'ability', id: cmd.id });
+      } else {
+        events.push({ t: 'ignored', cmd: 'UNLOCK_ABILITY' });
+      }
       break;
     }
 

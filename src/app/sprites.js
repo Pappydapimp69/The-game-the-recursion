@@ -82,10 +82,57 @@ const HOLLOW = [
   '....#.#.',
 ];
 
+// The warden — a squat, rooted guardian met from depth 2. Domed top tapering
+// into a wide, thorny/root-like base with a jagged bottom edge: reads as
+// planted/territorial, not another pursuing humanoid. Moss ramp.
+const WARDEN = [
+  '........',
+  '.....##.',
+  '....####',
+  '...#####',
+  '..######',
+  '..#?##?#',
+  '..######',
+  '...#####',
+  '..######',
+  '.#######',
+  '##.####.',
+  '#..##..#',
+  '#.#..#.#',
+  '..#..#..',
+  '.#....#.',
+  '#......#',
+];
+
+// The screamer — a fast alert-creature met from depth 3. A flared, mouth-like
+// head tapering into a thin whip of a body: reads as fast and alarm-like at a
+// glance, distinct from every humanoid silhouette already in the sheet.
+// Violet ramp.
+const SCREAMER = [
+  '...##...',
+  '..####..',
+  '.######.',
+  '.#?##?#.',
+  '..####..',
+  '...##...',
+  '...##...',
+  '....#...',
+  '....#...',
+  '...##...',
+  '....#...',
+  '...##...',
+  '....#...',
+  '...##...',
+  '....#...',
+  '........',
+];
+
 const CREATURES = {
   diver: { rows: DIVER, ramp: 'diver' },
   echo: { rows: ECHO, ramp: 'voice' },
   hollow: { rows: HOLLOW, ramp: 'hollow' },
+  warden: { rows: WARDEN, ramp: 'warden' },
+  screamer: { rows: SCREAMER, ramp: 'screamer' },
 };
 
 // Cell states after resolution (distinct from the authoring markup above).

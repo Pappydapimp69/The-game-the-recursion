@@ -87,7 +87,30 @@ export function makeWorld(seed = 'recursion', options = {}) {
     // CHOICE_POINTS.length) rather than re-supplied per ADVANCE_SPINE dispatch
     // — a threshold read from a COMMAND's own payload is bypassable by simply
     // omitting it; fixed in authoritative state at construction, it can't be.
-    spine: { stage: 0, learningIdx: 0, totalChoicePoints: options.totalChoicePoints || 0, variantOf: {} },
+    //
+    // depthQuotas is the same anti-bypass move applied to the multiple descent
+    // levels WITHIN 'learning': depthQuotas[d-1] is the CUMULATIVE learningIdx
+    // required to leave depth d, fixed at construction from content.js's own
+    // per-depth choice-point counts (never re-suppliable per ADVANCE_DEPTH
+    // dispatch). Defaults to a single depth so any caller that doesn't opt in
+    // (the demo, the older spine tests) gets the exact old one-floor behavior.
+    spine: {
+      stage: 0, learningIdx: 0, totalChoicePoints: options.totalChoicePoints || 0, variantOf: {},
+      depthQuotas: options.depthQuotas || [options.totalChoicePoints || 0],
+    },
+
+    // How many descent levels deep 'learning' goes this run, and which one the
+    // player is currently on (1-based). maxDepth defaults to 1 — a single
+    // floor, byte-for-byte the old behavior — unless the caller (main.js)
+    // explicitly opts into more.
+    depth: 1,
+    maxDepth: options.maxDepth || 1,
+
+    // Unlockable player abilities. A fixed, known set of keys (existence-gated
+    // at UNLOCK_ABILITY — prologue#E9: a gate can't unlock something that
+    // doesn't already exist as a slot), all false until a depth transition
+    // grants one.
+    abilities: { pulse: false, dash: false, ward: false },
 
     // Saga choices carried in + this run's, so the export can re-emit the chain.
     flags: {

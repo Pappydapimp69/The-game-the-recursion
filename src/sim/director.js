@@ -27,6 +27,8 @@ export function buildFacts(world) {
   for (const [k, v] of Object.entries(world.flags)) facts[`flags.${k}`] = v;
   for (const [k, v] of Object.entries(world.facets)) facts[`facets.${k}`] = v;
   facts.imported = !!world.settings.imported;
+  facts.depth = world.depth || 1;
+  facts.maxDepth = world.maxDepth || 1;
   facts['arc.choice'] = world.arc.choice || '';
   facts['quest.delivered'] = world.quest ? world.quest.delivered : 0;
   facts['quest.total'] = world.quest ? world.quest.total : 0;

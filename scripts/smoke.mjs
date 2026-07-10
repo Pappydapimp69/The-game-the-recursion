@@ -25,7 +25,7 @@ import { buildFacts, eligible, selectBeat } from '../src/sim/director.js';
 import { firedMarkersUpTo, markersInWindow } from '../src/sim/cutscene.js';
 import { createCutscenePlayer } from '../src/app/cutscene-player.js';
 import { subStream } from '../src/sim/rng.js';
-import { BEATS, CHOICE_POINTS, ENDINGS } from '../src/sim/content.js';
+import { BEATS, CHOICE_POINTS, ENDINGS, MAX_DEPTH, ABILITIES } from '../src/sim/content.js';
 import { createAudio } from '../src/app/audio.js';
 
 // The golden end-state fingerprint. null until first run prints it; then baked.
@@ -505,24 +505,96 @@ function runSpine(seed, choiceIdxs, endingIdx) {
   const w3 = runSpine('spine-a', [1, 1, 1, 1], 2);
   check('different choices export a different saga code', exportSaga(w3) !== code1);
 
-  // Content depth: four axes exercised, three endings, and the reveal beat
+  // Content depth: five axes exercised, three endings, and the reveal beat
   // actually reflects the DOMINANT trait (all-merciful choices -> a mercy
   // reveal), proving the retelling varies by who you became, not at random.
-  check('there are six learning choice points', CHOICE_POINTS.length === 6);
+  // Twelve choice points across four depths (six on depth 1, two per depth
+  // after) — up from the original six, closing a real gap where 'attachment'
+  // was declared as a fifth axis but never fed by any choice at all.
+  check('there are twelve learning choice points', CHOICE_POINTS.length === 12);
   check('there are three endings', ENDINGS.length === 3);
-  // Both mercy choices merciful (net +2), one resolve choice cancelled to 0 —
-  // mercy is the sole net-2 axis, so it must be the named dominant.
-  const merc = runSpine('dom-mercy', [0, 0, 0, 0, 0, 1], 0);
+  // CHOICE_POINTS order: shadow,name,echo,deeper,drowned,door (depth1),
+  // tether,mirror (depth2), warning,keep (depth3), last-mercy,threshold (depth4).
+  // Pick indices so mercy nets +3 (echo+drowned+last-mercy, all option 0) while
+  // every other axis stays well below the |sum|>=2 dominance threshold.
+  const merc = runSpine('dom-mercy', [0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0], 0);
   const mercFacts = buildFacts(merc);
   check('a consistently merciful player has mercy as the dominant trait', mercFacts.dominant === 'mercy' && mercFacts.dominantWord === 'merciful');
   check('a merciful player draws the merciful reveal beat', selectBeat(mercFacts, BEATS, { spineNode: 'reveal' }) === 'reveal-merciful');
-  // A player whose repeated axes cancel (mercy +1 then -1, resolve +1 then -1)
-  // reaches no net-2 lean on any axis, so there's no named dominant and the
-  // reveal is honestly unsure, not a random pick.
-  const wishy = runSpine('wishy', [0, 0, 0, 0, 1, 1], 0); // mercy(i2)+ mercy(i4)-, resolve(i0)+ resolve(i5)-
+  // A player whose choices cancel out axis by axis (every axis's two-or-three
+  // points chosen to net below the |sum|>=2 dominance threshold) reaches no
+  // named dominant, and the reveal is honestly unsure, not a random pick.
+  const wishy = runSpine('wishy', [0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0], 0);
   const wishyFacts = buildFacts(wishy);
   check('a self-cancelling player has no named dominant', wishyFacts.dominant === '');
   check('and draws the honestly-unsure reveal', selectBeat(wishyFacts, BEATS, { spineNode: 'reveal' }) === 'reveal-unsure');
+
+  // --- multi-descent depth progression + ability unlocks -------------------
+  // A world with NO maxDepth/depthQuotas opt-in behaves EXACTLY like the
+  // original single-floor game — the default is a single depth whose quota is
+  // whatever totalChoicePoints already was, so every test above (which never
+  // passes these options) is unaffected by this feature existing at all.
+  {
+    const plain = makeWorld('plain-depth', { totalChoicePoints: CHOICE_POINTS.length });
+    check('a world with no maxDepth opt-in defaults to a single depth', plain.maxDepth === 1 && plain.depth === 1);
+    check('its depthQuotas default to [totalChoicePoints]', plain.spine.depthQuotas.length === 1 && plain.spine.depthQuotas[0] === CHOICE_POINTS.length);
+  }
+
+  // A real multi-depth world: 2 depths, quotas [1, 3] (depth 1 needs 1 choice,
+  // depth 2 needs 2 more on top of that).
+  {
+    const d = makeWorld('depth-test', { totalChoicePoints: 3, maxDepth: 2, depthQuotas: [1, 3] });
+    reduce(d, { type: 'ADVANCE_SPINE' }); // intro -> learning
+    reduce(d, { type: 'ADVANCE_DEPTH' }); // attempted with zero choices made
+    check('ADVANCE_DEPTH refuses to advance before its own depth quota is met', d.depth === 1);
+
+    reduce(d, { type: 'CHOOSE_OPTION', pointId: 'x', axis: 'resolve', weight: 1 });
+    reduce(d, { type: 'ADVANCE_DEPTH' });
+    check('ADVANCE_DEPTH advances once THIS depth\'s quota is met', d.depth === 2);
+
+    reduce(d, { type: 'ADVANCE_DEPTH' });
+    check('ADVANCE_DEPTH refuses past maxDepth', d.depth === 2);
+
+    reduce(d, { type: 'ADVANCE_SPINE' }); // attempted with depth 2's own quota unmet
+    check('ADVANCE_SPINE still refuses to leave learning before ALL choices are made', d.spine.stage === 1);
+
+    reduce(d, { type: 'CHOOSE_OPTION', pointId: 'y', axis: 'mercy', weight: 1 });
+    reduce(d, { type: 'CHOOSE_OPTION', pointId: 'z', axis: 'candor', weight: 1 });
+    reduce(d, { type: 'ADVANCE_SPINE' });
+    check('ADVANCE_SPINE leaves learning once every choice AND every depth is reached', d.spine.stage === 2);
+  }
+
+  // Same shape, but proving ADVANCE_SPINE's depth half of the gate independently:
+  // all choices made, but depth never advanced (a caller that skipped
+  // ADVANCE_DEPTH entirely) must still be refused.
+  {
+    const skipDepth = makeWorld('skip-depth-test', { totalChoicePoints: 2, maxDepth: 2, depthQuotas: [1, 2] });
+    reduce(skipDepth, { type: 'ADVANCE_SPINE' }); // intro -> learning
+    reduce(skipDepth, { type: 'CHOOSE_OPTION', pointId: 'a', axis: 'resolve', weight: 1 });
+    reduce(skipDepth, { type: 'CHOOSE_OPTION', pointId: 'b', axis: 'mercy', weight: 1 });
+    check('all choices made but depth never advanced', skipDepth.spine.learningIdx === 2 && skipDepth.depth === 1);
+    reduce(skipDepth, { type: 'ADVANCE_SPINE' });
+    check('ADVANCE_SPINE refuses to leave learning if depth < maxDepth, even with every choice made', skipDepth.spine.stage === 1);
+  }
+
+  // UNLOCK_ABILITY: existence-gated (prologue#E9) — only a KNOWN key can be
+  // granted, and granting is idempotent (a repeat unlock is a harmless no-op
+  // event, not a double-grant of something that's already a boolean).
+  {
+    const ab = makeWorld('ability-test');
+    check('abilities start locked', ab.abilities.pulse === false && ab.abilities.dash === false && ab.abilities.ward === false);
+    reduce(ab, { type: 'UNLOCK_ABILITY', id: 'pulse' });
+    check('UNLOCK_ABILITY grants a known ability', ab.abilities.pulse === true);
+    reduce(ab, { type: 'UNLOCK_ABILITY', id: 'not-a-real-ability' });
+    check('UNLOCK_ABILITY ignores an unknown id (existence-gated, not invented)', Object.keys(ab.abilities).length === 3);
+    check('the other two abilities are untouched', ab.abilities.dash === false && ab.abilities.ward === false);
+  }
+
+  // Every ability declared in content.js unlocks at a depth within MAX_DEPTH,
+  // and MAX_DEPTH matches the depth actually reachable (referential integrity
+  // between the two content tables, same spirit as validate.js's ladder).
+  check('every ability unlocks at a real depth <= MAX_DEPTH', ABILITIES.every((a) => a.unlockDepth >= 1 && a.unlockDepth <= MAX_DEPTH));
+  check('MAX_DEPTH matches the highest depth any choice point is placed on', Math.max(...CHOICE_POINTS.map((cp) => cp.depth || 1)) === MAX_DEPTH);
 
   // The lost-voices quest: DELIVER_ECHOES banks toward the total, clamps there,
   // and a save-all run selects the deepened finale variant.

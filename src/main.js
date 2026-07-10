@@ -15,19 +15,51 @@ import { createInput } from './app/input.js';
 import { createTitleScreen } from './app/title.js';
 import { createChoiceScreen } from './app/choice-screen.js';
 import { createCutscenePlayer } from './app/cutscene-player.js';
-import { createExplore } from './app/explore.js';
+import { createExplore, PULSE_COOLDOWN_MS, PULSE_RADIUS, DASH_COOLDOWN_MS, WARD_COOLDOWN_MS } from './app/explore.js';
 import { makeSpriteSheet } from './app/sprites.js';
 import { createAudio } from './app/audio.js';
 import { PALETTE, shade } from './app/palette.js';
 import { exportSaga } from './sim/saga.js';
-import { gen, DEFAULT_SPEC, GEN_VERSION } from './sim/procgen.js';
+import { gen, GEN_VERSION } from './sim/procgen.js';
 import { buildFacts, selectBeat } from './sim/director.js';
 import { axisRead } from './sim/playermodel.js';
-import { BEATS, CHOICE_POINTS, ENDINGS, ECHO_COUNT } from './sim/content.js';
+import { BEATS, CHOICE_POINTS, ENDINGS, ECHO_COUNT, MAX_DEPTH, ABILITIES } from './sim/content.js';
 import { labelFor } from './app/device-labels.js';
 
 // Bump per deploy so a stale cache is observable, not guessed (the-game-prologue#E8).
-const BUILD_ID = 'p22';
+const BUILD_ID = 'p23';
+
+// Each descent level's procgen mission spec: depth 1 is the ORIGINAL single-
+// floor spec byte-for-byte; each floor after that adds one more gate+encounter
+// pair, so the map gets a little longer and busier every level without ever
+// touching procgen.js itself (gen() already takes an arbitrary spec).
+function specForDepth(depth) {
+  const spec = ['entry', 'key', 'gate', 'encounter'];
+  for (let i = 1; i < depth; i++) spec.push('gate', 'encounter');
+  spec.push('reward', 'exit');
+  return spec;
+}
+
+// Which enemies are active on a given floor — cumulative, one new kind per
+// floor (research: escalate via a new mechanic per level, not bigger numbers).
+function enemyKindsForDepth(depth) {
+  const kinds = ['hunter'];
+  if (depth >= 2) kinds.push('warden');
+  if (depth >= 3) kinds.push('screamer');
+  return kinds;
+}
+
+// spine.depthQuotas: the CUMULATIVE learningIdx required to leave each depth,
+// derived once from content.js's own per-choice-point depth tags — never
+// hand-authored numbers that could drift from the actual content.
+function computeDepthQuotas() {
+  const counts = new Array(MAX_DEPTH).fill(0);
+  for (const cp of CHOICE_POINTS) counts[(cp.depth || 1) - 1] += 1;
+  const quotas = [];
+  let running = 0;
+  for (let i = 0; i < MAX_DEPTH; i++) { running += counts[i]; quotas.push(running); }
+  return quotas;
+}
 
 // A cutscene shares its skip control with nothing else, but a bare tap can
 // still eat a story beat by accident — require a deliberate ~1.2s HOLD instead
@@ -114,6 +146,7 @@ let cutsceneHoldMs = 0;   // authoritative hold-to-skip counter (p19)
 let prevMs = 0;           // general per-frame delta for exploration
 let animMs = 0;           // free-running clock for idle animation
 let caughtFlash = 0;      // ms remaining on the red 'caught' vignette (P16)
+let abilityToast = null;  // { id, ms } — a brief "X unlocked" banner after a depth transition
 
 let title = createTitleScreen({
   onBegin: (opts) => startRun(opts),
@@ -127,7 +160,10 @@ function newWorld(opts) {
   // stored in world.seed so that run stays reproducible. e2e/tests can pass a
   // fixed opts.seed for a stable map.
   const seed = (opts && opts.seed) || `deep-${Date.now()}`;
-  return makeWorld(seed, { ...opts, totalChoicePoints: CHOICE_POINTS.length, echoTotal: ECHO_COUNT });
+  return makeWorld(seed, {
+    ...opts, totalChoicePoints: CHOICE_POINTS.length, echoTotal: ECHO_COUNT,
+    maxDepth: MAX_DEPTH, depthQuotas: computeDepthQuotas(),
+  });
 }
 
 // One place a run starts: build the world AND its sprite sheet (seeded from the
@@ -181,15 +217,20 @@ function beginIntro() {
   });
 }
 
-// "The learning" is now a walked space. Generate this run's map (pure function
-// of the seed), drop the player at the entry, and let them find the choices.
+// "The learning" is now a walked space, one of MAX_DEPTH descent levels.
+// Generate THIS floor's map (pure function of the seed + depth), drop the
+// player at the entry, and let them find the choices assigned to this depth.
 function beginLearning() {
   audio.setChord('learning'); audio.setMood(0.35);
-  learningMap = gen(world.seed, GEN_VERSION, DEFAULT_SPEC);
-  explore = createExplore(learningMap, CHOICE_POINTS, {
-    echoCount: ECHO_COUNT,
+  const depth = world.depth;
+  learningMap = gen(`${world.seed}:d${depth}`, GEN_VERSION, specForDepth(depth));
+  const floorChoices = CHOICE_POINTS.filter((cp) => (cp.depth || 1) === depth);
+  explore = createExplore(learningMap, floorChoices, {
+    echoCount: Math.ceil(ECHO_COUNT / MAX_DEPTH),
+    enemyKinds: enemyKindsForDepth(depth),
+    abilities: world.abilities,
     onGather: () => audio.confirm(), // a soft note as a lost voice is taken up
-    onCaught: () => { caughtFlash = 700; audio.cancel(); }, // the hunter reaches you
+    onCaught: () => { caughtFlash = 700; audio.cancel(); }, // an enemy reaches you
     onReachChoice: (assignment) => {
       // The encounter-echo is the quest-giver: reaching it also banks whatever
       // you carried this far, safe from the hunter.
@@ -201,12 +242,36 @@ function beginLearning() {
     },
     onReachExit: () => {
       deliverCarried(); // carry everything else up as you leave
-      dispatch({ type: 'ADVANCE_SPINE' }); // learning(1) -> reveal(2)
-      explore = null;
-      beginReveal();
+      if (world.depth < world.maxDepth) {
+        dispatch({ type: 'ADVANCE_DEPTH' });
+        const unlock = ABILITIES.find((a) => a.unlockDepth === world.depth);
+        if (unlock) { dispatch({ type: 'UNLOCK_ABILITY', id: unlock.id }); abilityToast = { id: unlock.id, ms: 0 }; }
+        explore = null;
+        beginDepthTransition();
+      } else {
+        dispatch({ type: 'ADVANCE_SPINE' }); // learning(1) -> reveal(2)
+        explore = null;
+        beginReveal();
+      }
     },
   });
   mode = 'explore';
+}
+
+// A short atmospheric beat between floors (never a mechanical aside — the
+// "ability unlocked" note is a separate on-screen banner, drawn in
+// renderExplore once the next floor opens), then straight into the next depth.
+function makeDepthTransitionScene() {
+  const facts = buildFacts(world);
+  const beatId = selectBeat(facts, BEATS, { spineNode: 'depth-transition', lastPlayed: world.director.lastPlayed });
+  const beat = BEATS.find((b) => b.id === beatId) || { lines: ['...'] };
+  dispatch({ type: 'BEAT_PLAYED', beatId });
+  const letterbox = { inMs: 300, outMs: 300, height: 0.14 };
+  return { id: `depth-transition:${beatId}`, totalMs: SCENE_TIME_CEILING_MS, cmdMarkers: [],
+    cosmeticTracks: { letterbox, captions: beat.lines } };
+}
+function beginDepthTransition() {
+  startCutscene(makeDepthTransitionScene(), () => beginLearning());
 }
 
 // Open a choice screen; onCommit runs the authoritative dispatch, onClose
@@ -293,10 +358,20 @@ function tickFrame(nowMs) {
     // The player's inquiry lean is the echoes' curiosity: a curious diver draws
     // the drifting voices close, a direct/guarded one keeps them at bay.
     const px = explore ? explore.player().x : 0, py = explore ? explore.player().y : 0;
-    if (explore) explore.update(move, dt, world ? axisRead('inquiry', world.playerModel.axes.inquiry).lean : 0);
+    if (explore) {
+      // Abilities: one press per unlocked ability, on the same three buttons
+      // no other explore-mode action currently uses. usePulse/useDash/useWard
+      // are all self-gating (a locked or on-cooldown ability is a no-op), so
+      // it's safe to just always try them on their press.
+      if (presses.includes('action') && explore.usePulse()) audio.chime();
+      if (presses.includes('confirm') && explore.useDash()) audio.step();
+      if (presses.includes('cancel') && explore.useWard()) audio.confirm();
+      explore.update(move, dt, world ? axisRead('inquiry', world.playerModel.axes.inquiry).lean : 0);
+    }
     if (explore && (explore.player().x !== px || explore.player().y !== py)) audio.step();
     if (caughtFlash > 0) caughtFlash = Math.max(0, caughtFlash - dt);
-    // The drone tightens when the hunter is on you.
+    if (abilityToast) { abilityToast.ms += dt; if (abilityToast.ms > 2800) abilityToast = null; }
+    // The drone tightens when an enemy is actively on you.
     if (explore) audio.setMood(explore.inDanger() ? 0.85 : 0.35);
   } else if (mode === 'choice') {
     if (presses.includes('confirm')) audio.confirm();
@@ -373,7 +448,7 @@ function isEdgeWall(tiles, w, h, x, y) {
   return false;
 }
 
-function renderExplore() {
+function renderExplore(device) {
   const W = canvas.width, H = canvas.height;
   const { w, h, tiles } = learningMap.grid;
   const p = explore.player();
@@ -450,11 +525,50 @@ function renderExplore() {
   // The hunter — the hollow's reaching fragment. Drawn on top; when it's hunting
   // it flickers faster and trails a faint dread.
   const hn = explore.hunter();
-  {
+  if (hn) {
     const hx = hn.x * TILE - camX - ENT / 2, hy = hn.y * TILE - camY - ENT / 2;
-    if (explore.inDanger()) { ctx.globalAlpha = 0.18; ctx.fillStyle = PALETTE.hollow[0];
+    const hunting = hn.state === 'hunt';
+    if (hunting) { ctx.globalAlpha = 0.18; ctx.fillStyle = PALETTE.hollow[0];
       ctx.beginPath(); ctx.arc(hx + ENT / 2, hy + ENT / 2, ENT * 0.7, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; }
-    drawEntitySized('hollow', hx, hy, ENT + 1, Math.floor(animMs / (explore.inDanger() ? 110 : 220)) & 1);
+    drawEntitySized('hollow', hx, hy, ENT + 1, Math.floor(animMs / (hunting ? 110 : 220)) & 1);
+  }
+
+  // The warden (depth 2+) — rooted near its post; a moss halo appears only
+  // while it's actually lunging, so its wake radius reads as a real threat
+  // rather than a constant glow.
+  const wd = explore.warden();
+  if (wd) {
+    const wx = wd.x * TILE - camX - ENT / 2, wy = wd.y * TILE - camY - ENT / 2;
+    if (wd.state === 'lunge') { ctx.globalAlpha = 0.2; ctx.fillStyle = PALETTE.warden[0];
+      ctx.beginPath(); ctx.arc(wx + ENT / 2, wy + ENT / 2, ENT * 0.6, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; }
+    drawEntitySized('warden', wx, wy, ENT, Math.floor(animMs / (wd.state === 'lunge' ? 130 : 260)) & 1);
+  }
+
+  // The screamer (depth 3+) — fast and flickery so it reads as skittish/alert
+  // even before it does anything.
+  const sc = explore.screamer();
+  if (sc) {
+    const scx = sc.x * TILE - camX - (ENT - 2) / 2, scy = sc.y * TILE - camY - (ENT - 2) / 2;
+    drawEntitySized('screamer', scx, scy, ENT - 2, Math.floor(animMs / 90) & 1);
+  }
+
+  // Ability cosmetics: an expanding pulse ring, and a soft steady halo while a
+  // ward is held.
+  const abilState = explore.abilityState();
+  if (abilState.lastPulse) {
+    const frac = Math.min(1, abilState.lastPulse.ms / 500);
+    const dx = abilState.lastPulse.x * TILE - camX, dy = abilState.lastPulse.y * TILE - camY;
+    ctx.globalAlpha = Math.max(0, 1 - frac) * 0.6;
+    ctx.strokeStyle = PALETTE.diver[2]; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(dx, dy, frac * PULSE_RADIUS * TILE, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  if (explore.onWard()) {
+    const dx = p.x * TILE - camX + TILE / 2, dy = p.y * TILE - camY + TILE / 2;
+    ctx.globalAlpha = 0.22 + 0.1 * Math.sin(animMs / 150);
+    ctx.strokeStyle = PALETTE.voice[2]; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(dx, dy, TILE * 1.1, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 
   // Danger vignette while hunted; a sharper red flash on a fresh catch.
@@ -467,19 +581,67 @@ function renderExplore() {
     ctx.restore();
   }
 
-  // HUD: choices left, the lost-voices quest, and the live model.
+  // HUD: descent depth, choices left, the lost-voices quest, and the live model.
   ctx.fillStyle = PALETTE.ink[1]; ctx.font = '9px ui-monospace, monospace';
   const rem = explore.remaining();
-  ctx.fillText(rem > 0 ? `voices to hear: ${rem}` : 'the way out is open', 8, 16);
+  ctx.fillText(`descent ${world.depth}/${world.maxDepth}  ·  ` + (rem > 0 ? `voices to hear: ${rem}` : 'the way out is open'), 8, 16);
   const carried = explore.carried();
   const delivered = world.quest.delivered, total = world.quest.total;
   ctx.fillStyle = PALETTE.voice[1];
   ctx.fillText(`lost voices  saved ${delivered}/${total}` + (carried > 0 ? `  ·  carrying ${carried}` : ''), 8, 28);
-  if (explore.inDanger()) {
+  if (hn && hn.state === 'hunt') {
     ctx.fillStyle = PALETTE.hollow[2];
     ctx.fillText('the hollow has your scent — reach the light', 8, 40);
+  } else if (wd && wd.state === 'lunge') {
+    ctx.fillStyle = PALETTE.warden[2];
+    ctx.fillText('the warden is awake — get clear of it', 8, 40);
   }
+
+  renderAbilitiesHud(device);
+  if (abilityToast) renderAbilityToast(device);
   renderModelHud();
+}
+
+// Ability hints, in the ACTIVE device's language — only shown once unlocked,
+// each with a small cooldown bar so "is this ready" is a glance, not a guess.
+function renderAbilitiesHud(device) {
+  if (!world) return;
+  const W = canvas.width;
+  const st = explore.abilityState();
+  const maxCd = { pulse: PULSE_COOLDOWN_MS, dash: DASH_COOLDOWN_MS, ward: WARD_COOLDOWN_MS };
+  ctx.font = '8px ui-monospace, monospace';
+  ctx.textAlign = 'right';
+  let ty = 12;
+  for (const a of ABILITIES) {
+    if (!world.abilities[a.id]) continue;
+    const cd = st[`${a.id}Cd`] || 0;
+    const ready = cd <= 0;
+    ctx.fillStyle = ready ? PALETTE.ink[1] : PALETTE.ink[3];
+    ctx.fillText(`${labelFor(device, a.press)} ${a.verb}`, W - 8, ty);
+    const barW = 40, barH = 3, bx = W - 8 - barW, by = ty + 3;
+    const frac = 1 - Math.min(1, cd / maxCd[a.id]);
+    ctx.fillStyle = PALETTE.ink[3]; ctx.fillRect(bx, by, barW, barH);
+    ctx.fillStyle = ready ? PALETTE.voice[1] : PALETTE.ink[2]; ctx.fillRect(bx, by, barW * frac, barH);
+    ty += 12;
+  }
+  ctx.textAlign = 'left';
+}
+
+// A brief "X unlocked" banner across the top, once per depth transition —
+// purely a UI note, so the dialogue prose itself never has to carry mechanical
+// asides.
+function renderAbilityToast(device) {
+  const info = ABILITIES.find((a) => a.id === abilityToast.id);
+  if (!info) return;
+  const W = canvas.width;
+  const fade = abilityToast.ms < 300 ? abilityToast.ms / 300 : abilityToast.ms > 2400 ? Math.max(0, (2800 - abilityToast.ms) / 400) : 1;
+  ctx.globalAlpha = fade;
+  ctx.fillStyle = 'rgba(4,5,10,0.65)'; ctx.fillRect(0, 44, W, 22);
+  ctx.fillStyle = PALETTE.voice[1]; ctx.font = '9px ui-monospace, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${info.name.toUpperCase()} — ${labelFor(device, info.press)} to ${info.verb}`, W / 2, 58);
+  ctx.textAlign = 'left';
+  ctx.globalAlpha = 1;
 }
 
 function renderChoice(device) {
@@ -649,7 +811,7 @@ function render(nowMs) {
       renderHoldToSkip(device);
     }
   }
-  else if (mode === 'explore') renderExplore();
+  else if (mode === 'explore') renderExplore(device);
   else if (mode === 'choice') renderChoice(device);
   else if (mode === 'ended') renderEnded();
   buildEl.textContent = `the recursion · build ${BUILD_ID} · mode ${mode}` + (world ? ` · fp ${fingerprint(fingerprintOf(world))}` : '');
@@ -674,12 +836,16 @@ window.__game = {
   explore: () => (explore ? { player: explore.player(), remaining: explore.remaining(), atExitReady: explore.atExitReady(),
     assignments: explore.assignments.map((a) => ({ pointId: a.cp.id, slot: a.slot, done: a.done })), exit: learningMap.exit,
     carried: explore.carried(), collectibles: explore.collectibles().map((c) => ({ x: c.x, y: c.y, taken: c.taken })),
-    hunter: { x: explore.hunter().x, y: explore.hunter().y, state: explore.hunter().state }, inDanger: explore.inDanger() } : null),
+    hunter: explore.hunter() ? { x: explore.hunter().x, y: explore.hunter().y, state: explore.hunter().state } : null,
+    warden: explore.warden() ? { x: explore.warden().x, y: explore.warden().y, state: explore.warden().state } : null,
+    screamer: explore.screamer() ? { x: explore.screamer().x, y: explore.screamer().y } : null,
+    abilityState: explore.abilityState(), inDanger: explore.inDanger() } : null),
   exploreStep: (dx, dy, dt = 120) => { if (explore) explore.update([Math.sign(dx), Math.sign(dy)], dt); },
-  // Advance only the ambient/hunter sim (no move) — e2e drives the hunter clock.
+  // Advance only the ambient/enemy sim (no move) — e2e drives their clocks.
   exploreTick: (dt = 100) => { if (explore) explore.update([0, 0], dt); },
   // Teleport the hunter next to the player to force a catch on the next tick (e2e).
-  forceHunterOnto: () => { if (explore) { const p = explore.player(); const hn = explore.hunter(); hn.x = p.x + 0.5; hn.y = p.y + 0.7; hn.state = 'hunt'; hn.stun = 0; } },
+  forceHunterOnto: () => { if (explore && explore.hunter()) { const p = explore.player(); const hn = explore.hunter(); hn.x = p.x + 0.5; hn.y = p.y + 0.7; hn.state = 'hunt'; hn.stun = 0; } },
+  useAbility: (id) => { if (!explore) return false; if (id === 'pulse') return explore.usePulse(); if (id === 'dash') return explore.useDash(); if (id === 'ward') return explore.useWard(); return false; },
   sagaCode: () => sagaCode,
   learningMap: () => learningMap,
   BUILD_ID,
